@@ -21,6 +21,7 @@ export class Player extends EventTarget {
     this.context = null; // {type, id, title} для режима list
     this.busy = false;
     this.loading = false;
+    this.handoffWave = false; // музыку забрали с устройства, где играла волна: после её треков — волна
     // «Назад» в волне: сыгранные треки (history) и те, к которым надо вернуться (forward).
     // Пока forward не пуст, мы переслушиваем прошлое и сервер волны не трогаем.
     this.history = [];
@@ -58,6 +59,7 @@ export class Player extends EventTarget {
   // --- запуск ---
 
   async startWave(options = {}) {
+    this.handoffWave = false;
     this.history = [];
     this.forward = [];
     this.setLoading(true);
@@ -75,6 +77,7 @@ export class Player extends EventTarget {
     if (!tracks.length) return;
     this.mode = "list";
     this.session = null;
+    this.handoffWave = false;
     this.history = [];
     this.forward = [];
     this.list = tracks;
@@ -82,6 +85,17 @@ export class Player extends EventTarget {
     this.context = context;
     this.setTrack(this.list[this.index]);
     await this.play();
+  }
+
+  // Музыку забрали с другого устройства: тот же трек с того же места, дальше — его очередь.
+  async handoff(tracks, position, wave, from) {
+    await this.playList(tracks, 0, { type: "other", id: "handoff", title: from });
+    this.handoffWave = wave;
+    if (position > 0) {
+      const seek = () => { this.audio.currentTime = position; };
+      if (this.audio.readyState >= 1) seek();
+      else this.audio.addEventListener("loadedmetadata", seek, { once: true });
+    }
   }
 
   async shuffle(tracks, context) {
@@ -186,6 +200,7 @@ export class Player extends EventTarget {
   }
 
   async continueAfterList() {
+    if (this.handoffWave) return this.startWave(); // на том устройстве играла волна — она и продолжится
     const prefs = await get("/api/preferences").catch(() => ({ continue_after_end: true }));
     if (!prefs.continue_after_end) {
       this.stop();
@@ -314,7 +329,20 @@ export class Player extends EventTarget {
     return this.list[this.index + 1] || null;
   }
 
+  /** Что будет после текущего трека: для другого устройства, если оно заберёт музыку. */
+  upNextIds(limit) {
+    const rest = this.mode === "wave" ? this.upcoming : this.list.slice(this.index + 1);
+    return rest.slice(0, limit).map((t) => t.id);
+  }
+
+  /** Откуда играет: «Моя волна», название альбома или плейлиста. */
+  get source() {
+    if (this.mode === "wave") return this.kind === "steer" && this.title ? `Моя волна по «${this.title}»` : "Моя волна";
+    return this.context?.title || "";
+  }
+
   get reason() {
+    if (this.mode === "list" && this.context?.id === "handoff") return `Продолжаю с «${this.context.title}»`;
     if (this.mode === "list") return this.context?.title ? `${contextLabel(this.context.type)}: ${this.context.title}` : "";
     return this.track?.reason || "";
   }

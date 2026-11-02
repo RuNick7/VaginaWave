@@ -2,6 +2,7 @@
 import { get, post } from "./api.js";
 import { cover, h, icon, prefs, toast } from "./dom.js";
 import { setTrackActions, waveSettingsPanel } from "./components.js";
+import { setupDevices } from "./devices.js";
 import { Player } from "./player.js";
 import { renderHome } from "./views/home.js";
 import { renderLibrary } from "./views/library.js";
@@ -235,6 +236,7 @@ function start() {
     if (s.syncing) toast("Синхронизирую библиотеку…");
   }).catch((e) => e.status !== 401 && toast("Сервис VaginaWave недоступен"));
   route();
+  setupDevices(player, document.getElementById("remote"));
 }
 
 applyInterface();

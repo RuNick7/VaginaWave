@@ -98,6 +98,8 @@ fun HomeScreen(nav: Navigator, onMore: (Track) -> Unit, onTune: () -> Unit) {
 
 @Composable
 private fun Hero(state: PlayerState, nav: Navigator, modifier: Modifier, onMore: (Track) -> Unit, onTune: () -> Unit) {
+    val online by Offline.online.collectAsState()
+    val forced by Offline.forced.collectAsState()
     val track = state.track
     val lyrics = if (track != null && UiPrefs.lyrics) load("lyrics", track.id) { Offline.lyrics(track.id) }.value else null
     val text = (lyrics as? Load.Done)?.value?.takeIf { it.lines.isNotEmpty() }
@@ -171,14 +173,20 @@ private fun Hero(state: PlayerState, nav: Navigator, modifier: Modifier, onMore:
                     if (UiPrefs.lyrics && (lyrics as? Load.Done)?.value?.lines?.isEmpty() == true) VolnaPlayer.say("У этого трека нет текста")
                 }
             }
-            if (track != null && state.offline) {
+            if (track != null && state.offline && forced) { // офлайн-режим включён вручную: выйти из него и в волну
+                Pill("Выйти из офлайна", VIcons.Wave) {
+                    Offline.setForced(false)
+                    VolnaPlayer.startWave()
+                }
+            } else if (track != null && state.offline && !online) {
                 Pill("Скачанное", VIcons.Download) { nav.go(Screen.Downloaded) }
-            } else if (track != null && state.mode == "list") {
+            } else if (track != null && (state.mode == "list" || state.offline)) { // связь вернулась — снова настоящая волна
                 Pill("Включить Мою волну", VIcons.Wave) { VolnaPlayer.startWave() }
             } else {
                 val steered = state.mode == "wave" && state.kind == "steer" && state.title.isNotEmpty()
                 val summary = waveSummary(state.settings)
-                Pill(if (steered) "По «${state.title}» · $summary" else summary, VIcons.Sliders, onClick = onTune)
+                // длинная надпись сокращается, чтобы очередь и «⋯» оставались на экране
+                Pill(if (steered) "По «${state.title}» · $summary" else summary, VIcons.Sliders, modifier = Modifier.weight(1f, fill = false), onClick = onTune)
             }
             if (track != null) {
                 IconButtonV(VIcons.Queue, "Очередь", 44.dp, tint = if (state.queue.isNotEmpty()) Palette.Fg else Palette.Muted) {
@@ -186,6 +194,13 @@ private fun Hero(state: PlayerState, nav: Navigator, modifier: Modifier, onMore:
                 }
                 IconButtonV(VIcons.More, "Ещё: волна и плейлист по треку", 44.dp, tint = Palette.Fg) { onMore(track) }
             }
+        }
+        if (track != null && state.mode == "wave" && state.kind == "steer" && state.title.isNotEmpty()) {
+            Text( // волна по треку, альбому или плейлисту: назад к обычной
+                "Вернуться к обычной Моей волне",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(top = 12.dp).clip(CircleShape).clickable { VolnaPlayer.startWave() }.padding(horizontal = 12.dp, vertical = 6.dp),
+            )
         }
         state.nextUp?.let { next ->
             Text(

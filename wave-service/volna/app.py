@@ -26,6 +26,7 @@ from starlette.background import BackgroundTask
 from . import __version__
 from .auth import COOKIE, TOKEN_TTL, Auth, LoginError, client_ip, request_token
 from .config import ServerConfig, Settings, normalize_url
+from .devices import Devices
 from .engine import Steer, WaveSession, build_mix, classify, register_playback
 from .explo import Explo, source_of
 from .imports import Importer
@@ -90,6 +91,21 @@ class PlaybackEvent(BaseModel):
     context_id: str = ""
     device: str = ""
     at: float | None = None  # когда слушали: события, накопленные без сети, приходят позже
+
+
+class DeviceState(BaseModel):
+    """Что играет на устройстве — другие устройства того же пользователя предложат забрать музыку."""
+
+    device_id: str = Field(min_length=8, max_length=64)
+    name: str = Field("", max_length=80)
+    kind: Literal["android", "web"] = "web"
+    track_id: str = Field("", max_length=200)
+    position: float = Field(0.0, ge=0)
+    duration: float = Field(0.0, ge=0)
+    playing: bool = False
+    mode: Literal["wave", "list", ""] = ""
+    source: str = Field("", max_length=200)  # «Моя волна», название альбома
+    next_ids: list[str] = Field(default_factory=list, max_length=50)
 
 
 class ContinueRequest(BaseModel):
@@ -319,6 +335,7 @@ class Space:
         self.defaults = defaults  # у основного пространства — настройки времён, когда пользователь был один
         self.profiles = ProfileManager(deps)
         self.sessions: dict[str, WaveSession] = {}
+        self.devices = Devices()  # что играет на телефонах и в браузерах этого пользователя
         self._artist_map: ArtistMap | None = None
 
     def artist_map(self, index: LibraryIndex) -> ArtistMap:
@@ -1019,6 +1036,49 @@ def create_app(settings: Settings | None = None, deps: Deps | None = None) -> Fa
         )
         sp.profiles.note_event()
         return {"kind": kind}
+
+    # --- другие устройства: «Играет на X. Слушать здесь?» ---
+
+    def device_json(sp: Space, d: dict) -> dict:
+        ids = [d["track_id"], *d.get("next_ids", [])]
+        index = sp.profiles.loaded_index()
+        known = {i: index.songs[i] for i in ids if index is not None and i in index.songs}
+        missing = [i for i in ids if i not in known]
+        if missing:
+            try:
+                known.update(sp.deps.library.songs(missing))
+            except Exception:  # noqa: BLE001 — без названий устройство всё равно видно
+                log.warning("Не удалось получить треки для устройства %s", d.get("name"))
+        track = known.get(d["track_id"])
+        return {
+            "device_id": d["device_id"],
+            "name": d.get("name") or "Другое устройство",
+            "kind": d.get("kind", ""),
+            "playing": bool(d.get("playing")),
+            "position": round(d.get("position", 0.0), 1),
+            "mode": d.get("mode", ""),
+            "source": d.get("source", ""),
+            "track": track_json(track) if track else None,
+            "next": [track_json(known[i]) for i in d.get("next_ids", []) if i in known],
+            "seconds_ago": round(max(0.0, time.time() - d["updated"]), 1),
+        }
+
+    @app.put("/api/devices/me")
+    def device_report(body: DeviceState, sp: Space = Depends(current_space)) -> dict:
+        """Устройство сообщает, что у него играет; в ответ — команды ему и другие устройства."""
+        commands = sp.devices.report(body.device_id, body.model_dump())
+        return {"commands": commands, "devices": [device_json(sp, d) for d in sp.devices.others(body.device_id)]}
+
+    @app.get("/api/devices")
+    def devices_list(device_id: str = "", sp: Space = Depends(current_space)) -> dict:
+        return {"devices": [device_json(sp, d) for d in sp.devices.others(device_id)]}
+
+    @app.post("/api/devices/{device_id}/pause")
+    def device_pause(device_id: str, by: str = "", sp: Space = Depends(current_space)) -> dict:
+        """Музыку забрали на другое устройство: прежнее встанет на паузу со следующим отчётом."""
+        if not sp.devices.command(device_id, "pause", by=by[:80]):
+            raise HTTPException(404, "Устройство больше не на связи")
+        return {"ok": True}
 
     @app.post("/api/like")
     def like_entity(body: EntityLikeRequest, sp: Space = Depends(current_space)) -> dict:

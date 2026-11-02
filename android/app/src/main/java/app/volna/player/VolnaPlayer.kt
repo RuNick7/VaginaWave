@@ -96,6 +96,7 @@ object VolnaPlayer {
     private var resume: Track? = null // с чего продолжить волну или список после очереди
     private var resumeEnd = false // список кончился, пока играла очередь: дальше — продолжение волной
     private var busy = false
+    private var handoffWave = false // музыку забрали с устройства, где играла волна: после её треков — волна
     private var loading = false
     private var message: String? = null
 
@@ -107,7 +108,7 @@ object VolnaPlayer {
         // звук проходит через «тройник»: ExoPlayer играет его как обычно, а AudioLevel меряет громкость для фона
         val renderers = object : DefaultRenderersFactory(context) {
             override fun buildAudioSink(context: Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean): AudioSink =
-                DefaultAudioSink.Builder(context).setAudioProcessors(arrayOf(TeeAudioProcessor(AudioLevel))).build()
+                AudioLevel.Sink(DefaultAudioSink.Builder(context).setAudioProcessors(arrayOf(TeeAudioProcessor(AudioLevel))).build())
         }
         // скачанное играет из кэша загрузок, остальное — потоком с сервиса (тоже с токеном);
         // сам плеер в кэш не пишет, это делает только загрузчик
@@ -140,7 +141,7 @@ object VolnaPlayer {
                 val network = error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
                     error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT
                 if ((network || !Offline.isOnline) && this@VolnaPlayer.context != OFFLINE && Downloads.hasAny()) {
-                    startOffline("Нет связи — играю скачанное")
+                    startOffline(Offline.switchNote)
                     return
                 }
                 say("Трек не воспроизводится, беру следующий")
@@ -177,7 +178,9 @@ object VolnaPlayer {
     }
 
     fun startWave(seedType: String? = null, seedId: String? = null) {
-        if (!Offline.isOnline) return startOffline(if (seedType != null) "Нет связи: играю скачанное" else null)
+        // волну просят явно — пробуем сервис, если сеть есть; не ответит — сыграем скачанное
+        if (!Offline.canTry) return startOffline(if (seedType != null) "Нет связи: играю скачанное" else null)
+        handoffWave = false
         history.clear()
         forward.clear()
         leaveQueue() // новая волна начинается сразу; добавленное в очередь сыграет после её первого трека
@@ -189,7 +192,7 @@ object VolnaPlayer {
             } catch (e: ApiException) {
                 say(problem(e))
             } catch (e: IOException) {
-                if (Downloads.hasAny()) startOffline("Нет связи — играю скачанное") else say(problem(e))
+                if (Downloads.hasAny()) startOffline(Offline.switchNote) else say(problem(e))
             } finally {
                 loading = false
                 publish()
@@ -209,6 +212,7 @@ object VolnaPlayer {
         }
         mode = "list"
         session = null
+        handoffWave = false
         history.clear()
         forward.clear()
         list = playable
@@ -220,6 +224,13 @@ object VolnaPlayer {
 
     fun shuffle(tracks: List<Track>, context: PlayContext) =
         playList((if (Offline.isOnline) tracks else tracks.filter { Downloads.isDone(it.id) }).shuffled(), 0, context)
+
+    /** Музыку забрали с другого устройства: тот же трек с того же места, дальше — его очередь. */
+    fun handoff(tracks: List<Track>, positionMs: Long, wave: Boolean, from: String) {
+        playList(tracks, 0, PlayContext("other", "handoff", from))
+        if (current?.id == tracks.firstOrNull()?.id && positionMs > 0) exo.seekTo(positionMs)
+        handoffWave = wave
+    }
 
     /** Волна без сети: скачанное вперемешку, лайкнутое и запас — чаще. */
     fun startOffline(note: String? = null) {
@@ -235,7 +246,7 @@ object VolnaPlayer {
 
     /** Связь пропала посреди волны: скачанный текущий трек доигрывает, дальше — скачанное. */
     private fun goOffline(playing: Track?) {
-        if (playing == null || !Downloads.isDone(playing.id)) return startOffline("Нет связи — играю скачанное")
+        if (playing == null || !Downloads.isDone(playing.id)) return startOffline(Offline.switchNote)
         mode = "list"
         session = null
         forward.clear()
@@ -245,7 +256,7 @@ object VolnaPlayer {
         current = playing
         refreshTail()
         publish()
-        say("Нет связи — дальше скачанное")
+        say(if (Offline.forced.value) "Офлайн-режим — дальше скачанное" else "Нет связи — дальше скачанное")
     }
     // --- переключение ---
 
@@ -272,7 +283,7 @@ object VolnaPlayer {
                     mode == "wave" && !Offline.isOnline -> {
                         report(track, outcome, position, duration, PlayContext("other"))
                         remember(track)
-                        startOffline("Нет связи — играю скачанное")
+                        startOffline(Offline.switchNote)
                     }
                     mode == "wave" -> {
                         val data = api.advance(session ?: return@launch, track.id, outcome, position, duration)
@@ -306,7 +317,7 @@ object VolnaPlayer {
                     report(track, outcome, position, duration, PlayContext("other"))
                     remember(track)
                 }
-                if (Downloads.hasAny()) startOffline("Нет связи — играю скачанное") else say(problem(e))
+                if (Downloads.hasAny()) startOffline(Offline.switchNote) else say(problem(e))
             } finally {
                 busy = false
             }
@@ -535,6 +546,7 @@ object VolnaPlayer {
     private suspend fun continueAfterList() {
         if (!Offline.isOnline) return startOffline(if (context == OFFLINE) null else "Список закончился — дальше скачанное")
         if (context == OFFLINE) return startWave() // связь вернулась: снова настоящая волна
+        if (handoffWave) return startWave() // на том устройстве играла волна — она и продолжится
         val keepGoing = runCatching { api.preferences().optBoolean("continue_after_end", true) }.getOrDefault(true)
         if (!keepGoing) {
             exo.pause()
@@ -559,6 +571,7 @@ object VolnaPlayer {
 
     private fun applyWave(data: WaveState) {
         mode = "wave"
+        context = null // источник списка (альбом, скачанное) к волне не относится
         session = data.session
         kind = data.kind
         title = data.title
@@ -764,7 +777,8 @@ object VolnaPlayer {
 
     private fun reason(): String {
         val context = context
-        if (context == OFFLINE && !replaying && !fromQueue) return "Без сети · из скачанного"
+        if (mode == "list" && context == OFFLINE && !replaying && !fromQueue) return "Без сети · из скачанного"
+        if (mode == "list" && context?.id == "handoff" && !replaying && !fromQueue) return "Продолжаю с «${context.title}»"
         if (mode == "list" && !replaying && context != null && context.title.isNotEmpty()) {
             val label = mapOf("album" to "Альбом", "playlist" to "Плейлист", "artist" to "Артист", "search" to "Поиск", "library" to "Коллекция")
             return "${label[context.type] ?: "Сейчас"}: ${context.title}"
@@ -791,7 +805,7 @@ object VolnaPlayer {
             fromQueue = fromQueue,
             upNext = upNext().take(20),
             source = source(),
-            offline = context == OFFLINE,
+            offline = mode == "list" && context == OFFLINE,
         )
     }
 

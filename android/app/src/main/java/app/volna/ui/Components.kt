@@ -241,10 +241,10 @@ fun Loading() {
 
 /** Кнопка-«пилюля». primary — белая с чёрным текстом. */
 @Composable
-fun Pill(text: String, icon: ImageVector? = null, primary: Boolean = false, onClick: () -> Unit) {
+fun Pill(text: String, icon: ImageVector? = null, primary: Boolean = false, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val shape = RoundedCornerShape(50)
     Row(
-        Modifier
+        modifier
             .clip(shape)
             .background(if (primary) Palette.Fg else Palette.Veil)
             .border(1.dp, if (primary) Palette.Fg else Palette.Faint, shape)
@@ -255,7 +255,7 @@ fun Pill(text: String, icon: ImageVector? = null, primary: Boolean = false, onCl
     ) {
         if (icon != null) VIcon(icon, null, 18.dp, if (primary) Palette.Bg else Palette.Fg)
         Text(text, style = MaterialTheme.typography.titleMedium.copy(fontSize = MaterialTheme.typography.bodyMedium.fontSize),
-            color = if (primary) Palette.Bg else Palette.Fg)
+            color = if (primary) Palette.Bg else Palette.Fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

@@ -30,7 +30,8 @@ export function renderHome(root, { player, navigate, openWaveSheet, openTrackAct
   );
   const tuneLabel = h("span", {});
   const tune = h("button", { class: "tune-pill", type: "button", "aria-label": "Настроить волну", onClick: openWaveSheet }, icon("sliders"), tuneLabel);
-  const backToWave = h("button", { class: "tune-pill", type: "button", onClick: () => player.startWave() }, icon("wave"), h("span", {}, "Включить Мою волну"));
+  const backToWaveLabel = h("span", {}, "Включить Мою волну");
+  const backToWave = h("button", { class: "tune-pill", type: "button", onClick: () => player.startWave() }, icon("wave"), backToWaveLabel);
   const next = h("div", { class: "next" });
 
   const hero = h(
@@ -62,7 +63,8 @@ export function renderHome(root, { player, navigate, openWaveSheet, openTrackAct
     const steered = player.mode === "wave" && player.kind === "steer" && player.title;
     tuneLabel.textContent = steered ? `По «${player.title}» · ${waveSummary(player.settings)}` : waveSummary(player.settings);
     tune.hidden = Boolean(t) && player.mode === "list";
-    backToWave.hidden = !(t && player.mode === "list");
+    backToWave.hidden = !(t && (player.mode === "list" || steered)); // из альбома или волны по треку — в обычную волну
+    backToWaveLabel.textContent = steered ? "Обычная волна" : "Включить Мою волну";
     const up = player.nextUp;
     next.textContent = up ? `Дальше: ${up.title} · ${up.artist}` : "";
   }

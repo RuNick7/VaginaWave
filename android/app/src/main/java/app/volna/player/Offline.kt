@@ -118,7 +118,15 @@ object Offline {
     fun setForced(on: Boolean) {
         prefs.forceOffline = on
         _forced.value = on
+        if (!on) api.reachable.value = true // вышли из офлайна — пробуем сервис снова, не дожидаясь проверки
+        _online.value = isOnlineNow() // сразу: следом может стартовать волна, ей надо знать, есть ли связь
     }
+
+    /** Почему волна перешла на скачанное — для подсказки. */
+    val switchNote: String get() = if (_forced.value) "Офлайн-режим — играю скачанное" else "Нет связи — играю скачанное"
+
+    /** Стоит пробовать сервис: сеть есть и офлайн не включён вручную, даже если прошлый запрос не дошёл. */
+    val canTry: Boolean get() = network.value && !_forced.value
 
     /** Включить или выключить загрузку «Мне нравится»; tracks — уже известный список лайков. */
     fun setLikedDownloads(on: Boolean, tracks: List<Track>? = null) {

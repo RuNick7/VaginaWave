@@ -237,6 +237,12 @@ class VolnaApi(val prefs: Prefs) {
         post("/api/mix", JSONObject().put("seed", JSONObject().put("type", type).put("id", id)).put("size", size)),
     )
 
+    // --- другие устройства ---
+
+    suspend fun reportDevice(state: JSONObject): JSONObject = put("/api/devices/me", state)
+    suspend fun devices(deviceId: String): JSONObject = get("/api/devices?device_id=${q(deviceId)}")
+    suspend fun pauseDevice(deviceId: String, by: String): JSONObject = post("/api/devices/${q(deviceId)}/pause?by=${q(by)}")
+
     suspend fun createPlaylist(name: String, trackIds: List<String>): JSONObject =
         post("/api/playlists", JSONObject().put("name", name).put("track_ids", JSONArray(trackIds)))
 

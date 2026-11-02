@@ -47,11 +47,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.width
+import app.volna.player.Devices
 import app.volna.player.Offline
+import app.volna.player.RemoteDevice
 import app.volna.player.PlaybackService
 import app.volna.player.VolnaPlayer
 import app.volna.ui.ConnectScreen
 import app.volna.ui.DownloadedScreen
+import app.volna.ui.Pill
 import app.volna.ui.VIcon
 import app.volna.ui.VIcons
 import app.volna.ui.AddArtistScreen
@@ -122,6 +125,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        Devices.visible = true
+        Devices.refresh() // не играет ли что-то на другом устройстве
         Updates.resume() // вернулись из настроек, где разрешили установку, — ставим обновление
     }
 
@@ -138,6 +143,11 @@ class MainActivity : ComponentActivity() {
         // подключаемся к сервису воспроизведения: так музыка продолжит играть в фоне и в уведомлении
         val token = SessionToken(this, ComponentName(this, PlaybackService::class.java))
         controller = MediaController.Builder(this, token).buildAsync()
+    }
+
+    override fun onPause() {
+        Devices.visible = false
+        super.onPause()
     }
 
     override fun onStop() {
@@ -202,6 +212,7 @@ private fun VolnaRoot() {
                     is Screen.SettingsPage -> SettingsPage(screen.key, nav)
                 } }
             }
+            RemoteBar()
             OfflineBar { nav.go(Screen.Downloaded) }
             if (nav.current != Screen.Home && state.track != null) MiniPlayer { nav.go(Screen.Home) }
             TabBar(nav.tab) { nav.tab(it) }
@@ -218,6 +229,35 @@ private fun VolnaRoot() {
                 VolnaPlayer.shake()
             })
         }
+    }
+}
+
+/** «Играет на X»: на другом устройстве идёт музыка, а здесь тихо — можно забрать её сюда. */
+@Composable
+private fun RemoteBar() {
+    val others by Devices.others.collectAsState()
+    val state by VolnaPlayer.state.collectAsState()
+    val device: RemoteDevice = others.firstOrNull { it.playing && it.track != null } ?: return
+    val track = device.track ?: return
+    if (state.playing) return
+    Row(
+        Modifier.fillMaxWidth().background(Palette.Veil).padding(start = 16.dp, end = 12.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        VIcon(VIcons.Playback, null, 20.dp, Palette.Muted)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text("Играет на «${device.name}»", style = MaterialTheme.typography.bodySmall, color = Palette.Muted, maxLines = 1)
+            Text(
+                "${track.title} · ${track.artist}",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Pill("Слушать здесь", primary = true) { Devices.takeOver(device) }
     }
 }
 

@@ -3,6 +3,7 @@ package app.volna
 import android.app.Application
 import app.volna.data.Prefs
 import app.volna.data.VolnaApi
+import app.volna.player.Devices
 import app.volna.player.Downloads
 import app.volna.player.Offline
 import app.volna.player.VolnaPlayer
@@ -26,6 +27,7 @@ class VolnaApp : Application(), SingletonImageLoader.Factory {
         Offline.init(this, api, prefs)
         VolnaPlayer.init(this, api)
         Updates.init(this, api.client)
+        Devices.init(this, api, prefs)
         SearchHistory.init(prefs)
     }
 

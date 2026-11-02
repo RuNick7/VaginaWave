@@ -55,7 +55,9 @@ fun Topo(modifier: Modifier = Modifier, mode: String = "live", dim: Boolean = fa
         while (true) {
             val now = withFrameMillis { it }
             if (now - last >= 33) { // ~30 кадров в секунду достаточно и бережёт батарею
-                loud += ((if (react) AudioLevel.level else 0f) - loud) * 0.22f
+                // громкость того, что звучит сейчас; удар — сразу, затихание — плавно, чтобы линии шли в такт
+                val target = if (react) AudioLevel.current() else 0f
+                loud += (target - loud) * (if (target > loud) 0.65f else 0.2f)
                 time += min((now - last) / 1000f, 0.1f) * (0.5f + energy * 2.2f) * speed
                 last = now
             }
