@@ -104,7 +104,7 @@
 
   function sample() {
     const sc = 0.0017;
-    const amp = 1 + energy * 0.9;
+    const amp = 1 + energy * 0.55; // при 0.9 линии прыгали на каждый удар
     const flow = time * 0.06;
     for (let r = 0; r < rows; r++) {
       const y = r * step;
@@ -186,16 +186,30 @@
     ctx.stroke(paths[1]);
   }
 
+  // Постоянные времени в секундах: результат не зависит от частоты кадров.
+  const ATTACK = 0.09; // удар поднимает рельеф мягко, но заметно
+  const RELEASE = 0.55; // а опускается он плавно
+  const DRIVE = 0.8; // скорость течения ещё плавнее: линии не дёргаются на каждый удар
+  const approach = (value, target, dt, tau) => value + (target - value) * (1 - Math.exp(-dt / tau));
+  let drive = 0;
+  let minFrame = 15; // кадры на частоте экрана; не успеваем — переходим на половину
+  let slowFrames = 0;
+
   function frame(now) {
     requestAnimationFrame(frame);
-    if (document.hidden || now - lastFrame < 33) return;
+    if (document.hidden || now - lastFrame < (mode.speed < 1 ? 30 : minFrame)) return;
     const dt = Math.min((now - lastFrame) / 1000, 0.1);
     lastFrame = now;
-    energy += (energySource() - energy) * 0.12;
-    dim += (dimTarget - dim) * 0.1;
+    const target = energySource();
+    energy = approach(energy, target, dt, target > energy ? ATTACK : RELEASE);
+    drive = approach(drive, energy, dt, DRIVE);
+    dim = approach(dim, dimTarget, dt, 0.25);
     if (mode.speed === 0 && Math.abs(dimTarget - dim) < 0.01) return;
-    time += dt * (0.5 + energy * 2.2) * mode.speed;
+    time += dt * (0.5 + drive * 2.2) * mode.speed;
+    const started = performance.now();
     render();
+    slowFrames = performance.now() - started > 12 ? slowFrames + 1 : Math.max(0, slowFrames - 1);
+    if (slowFrames > 30) minFrame = 30; // слабое устройство: 30 кадров, зато ровных
   }
 
   window.addEventListener("resize", resize);

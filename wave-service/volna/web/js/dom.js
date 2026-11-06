@@ -47,6 +47,13 @@ const ICONS = {
   more: '<circle cx="5" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="19" cy="12" r="1.4" fill="currentColor"/>',
   mix: '<path d="M4 6h12M4 11h12M4 16h7"/><path d="M17 14v6M14 17h6"/>',
   sync: '<path d="M20 12a8 8 0 0 1-14 5.3M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v4h-4M6 21v-4h4"/>',
+  "chevron-down": '<path d="M6 9l6 6 6-6"/>',
+  expand: '<path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/>',
+  check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+  queue: '<path d="M4 6h16M4 11h16M4 16h8"/><path d="M15 13.5v6l5-3z" fill="currentColor"/>',
+  grip: '<path d="M5 9h14M5 15h14"/>',
+  lyrics: '<path d="M4 6h12M4 10h12M4 14h7"/><path d="M17 18.5V12l3-1"/><circle cx="15.5" cy="18.5" r="1.5"/>',
+  download: '<path d="M12 4v11M7.5 10.5l4.5 4.5 4.5-4.5"/><path d="M5 19.5h14"/>',
 };
 
 export function icon(name, extraClass = "") {

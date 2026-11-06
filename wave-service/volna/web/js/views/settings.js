@@ -2,6 +2,7 @@
 import { del, get, post, put } from "../api.js";
 import { ago, h, icon, plural, prefs, savePrefs, toast } from "../dom.js";
 import { chips, empty, group, loading, pageHeader, toggle, waveSettingsPanel, waveSummary } from "../components.js";
+import { forgetSearch } from "./search.js";
 
 const CATEGORIES = [
   ["server", "Сервер", "server", "Navidrome и AudioMuse"],
@@ -49,6 +50,7 @@ function rootPage(root, { navigate, player }) {
     if (!me.auth) return;
     const logout = async () => {
       await post("/api/auth/logout").catch(() => {});
+      forgetSearch();
       location.reload();
     };
     root.append(h("button", { class: "link-btn settings-logout", type: "button", onClick: logout }, `Выйти (${me.user})`));
@@ -181,11 +183,15 @@ function host(url) {
 
 // --- волна ---
 
-function wavePage(root, { player }) {
+function wavePage(root, { player, openOnboarding }) {
   root.append(
     pageHeader("Моя волна", { back: true }),
     h("p", { class: "hint" }, "Те же настройки открываются кнопкой под волной на главной. Меняются на ходу: текущий трек доигрывает, пересобирается очередь."),
     waveSettingsPanel(player, { onShake: () => player.shake() }),
+    group(null,
+      h("button", { class: "btn", type: "button", onClick: () => openOnboarding() }, icon("artist"), "Настроить вкус заново"),
+      h("p", { class: "hint" }, "Снова выбрать любимых артистов и то, как вам слушается."),
+    ),
   );
 }
 
@@ -305,7 +311,7 @@ function aboutPage(root) {
       ),
       group("Горячие клавиши",
         h("dl", { class: "keys" },
-          ...[["Пробел", "пауза / продолжить"], ["→", "дальше"], ["←", "назад (в альбоме и плейлисте)"], ["L", "нравится"], ["D", "не нравится"], ["S", "встряхнуть волну"], ["/", "поиск"]]
+          ...[["Пробел", "пауза / продолжить"], ["→", "дальше"], ["←", "назад (в альбоме и плейлисте)"], ["L", "нравится"], ["D", "не нравится"], ["S", "встряхнуть волну"], ["T", "текст песни на весь экран"], ["Q", "очередь"], ["/", "поиск"]]
             .flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
       ),
     );

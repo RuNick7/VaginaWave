@@ -3,11 +3,16 @@ import { get, post } from "./api.js";
 import { cover, h, icon, prefs, toast } from "./dom.js";
 import { setTrackActions, waveSettingsPanel } from "./components.js";
 import { setupDevices } from "./devices.js";
+import { trackSwipe } from "./gestures.js";
+import { setupLyricsScreen } from "./lyrics.js";
+import { setupOnboarding } from "./onboarding.js";
 import { Player } from "./player.js";
 import { renderHome } from "./views/home.js";
+import { renderAddArtist, renderImport } from "./views/imports.js";
 import { renderLibrary } from "./views/library.js";
 import { renderLogin } from "./views/login.js";
 import { renderMix } from "./views/mix.js";
+import { renderQueue } from "./views/queue.js";
 import { renderEntity } from "./views/pages.js";
 import { renderSearch } from "./views/search.js";
 import { renderSettings } from "./views/settings.js";
@@ -18,6 +23,8 @@ const tabbar = document.getElementById("tabbar");
 const mini = document.getElementById("mini");
 const sheet = document.getElementById("sheet");
 const backdrop = document.getElementById("sheet-backdrop");
+const lyricsScreen = setupLyricsScreen(player, document.getElementById("lyrics-full"));
+const onboarding = setupOnboarding(player, document.getElementById("onboarding"));
 
 const TABS = [
   ["home", "Главная", "wave", "#/"],
@@ -37,6 +44,8 @@ const ctx = {
   openWaveSheet,
   openTrackActions,
   applyInterface,
+  openLyrics: () => lyricsScreen.open(),
+  openOnboarding: () => onboarding.open(),
 };
 
 // --- вкладки и маршруты ---
@@ -47,8 +56,27 @@ tabbar.append(
   ),
 );
 
+// «Назад» возвращает прокрутку: страницы грузятся не сразу, поэтому пробуем, пока высота не дорастёт.
+const scrolls = new Map();
+const trail = [];
+let shownHash = null;
+
+function restoreScroll(top) {
+  let tries = 0;
+  const tick = () => {
+    view.scrollTop = top;
+    if (Math.abs(view.scrollTop - top) > 1 && tries++ < 40) setTimeout(tick, 50);
+  };
+  if (top) tick();
+}
+
 function route() {
   const [section = "", a = "", b = ""] = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
+  if (shownHash !== null) scrolls.set(shownHash, view.scrollTop);
+  shownHash = location.hash;
+  const back = trail.length >= 2 && trail[trail.length - 2] === shownHash;
+  if (back) trail.pop();
+  else if (trail[trail.length - 1] !== shownHash) trail.push(shownHash);
   cleanup?.();
   cleanup = null;
   view.replaceChildren();
@@ -60,6 +88,12 @@ function route() {
   } else if (section === "library") {
     activeTab = "library";
     cleanup = renderLibrary(view, ctx, a);
+  } else if (section === "queue") {
+    cleanup = renderQueue(view, ctx);
+  } else if (section === "import") {
+    cleanup = renderImport(view, ctx);
+  } else if (section === "add-artist") {
+    cleanup = renderAddArtist(view, ctx);
   } else if (section === "mix" && a && b) {
     cleanup = renderMix(view, ctx, a, b); // плейлист по треку или артисту
   } else if (["album", "artist", "playlist"].includes(section) && a) {
@@ -75,6 +109,7 @@ function route() {
   for (const tab of tabbar.children) tab.setAttribute("aria-current", tab.dataset.tab === activeTab ? "page" : "false");
   renderMini();
   window.Topo?.setDim(section !== "" && section !== "home");
+  if (back) restoreScroll(scrolls.get(shownHash));
 }
 
 window.addEventListener("hashchange", route);
@@ -86,10 +121,12 @@ const miniTitle = h("span", { class: "mini__title" });
 const miniSub = h("span", { class: "mini__sub" });
 const miniPlay = h("button", { class: "icon-btn", type: "button", "aria-label": "Пауза", onClick: () => player.toggle() });
 const miniBar = h("span", { class: "mini__bar" });
+const miniOpen = h("button", { class: "mini__open", type: "button", "aria-label": "Открыть плеер", onClick: () => ctx.navigate("#/") },
+  miniCover, h("span", { class: "mini__text" }, miniTitle, miniSub));
+trackSwipe(miniOpen, player);
 mini.append(
   miniBar,
-  h("button", { class: "mini__open", type: "button", "aria-label": "Открыть плеер", onClick: () => ctx.navigate("#/") },
-    miniCover, h("span", { class: "mini__text" }, miniTitle, miniSub)),
+  miniOpen,
   h("button", { class: "icon-btn", type: "button", "aria-label": "Назад", onClick: () => player.previous() }, icon("prev")),
   miniPlay,
   h("button", { class: "icon-btn", type: "button", "aria-label": "Дальше", onClick: () => player.next("skip") }, icon("next")),
@@ -142,6 +179,8 @@ function openTrackActions(track) {
       cover(track.cover, "cover--sm"),
       h("span", { class: "track__text" }, h("span", { class: "track__title" }, track.title), h("span", { class: "track__sub" }, track.artist))),
     h("div", { class: "tiles" },
+      action("Играть следующим", "queue", () => player.playNext(track)),
+      action("Добавить в очередь", "queue", () => player.enqueue(track)),
       action("Моя волна по треку", "wave", () => {
         player.startWave({ seed: { type: "track", id: track.id } });
         ctx.navigate("#/");
@@ -181,6 +220,7 @@ backdrop.addEventListener("click", closeSheet);
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !sheet.hidden) return closeSheet();
+  if (event.key === "Escape" && lyricsScreen.isOpen) return lyricsScreen.close();
   const typing = event.target.closest?.("input, textarea, select");
   if (typing || !sheet.hidden || event.metaKey || event.ctrlKey || event.altKey) return;
   const actions = {
@@ -190,6 +230,8 @@ document.addEventListener("keydown", (event) => {
     KeyL: () => player.like(),
     KeyD: () => player.next("dislike"),
     KeyS: () => player.shake(),
+    KeyT: () => (lyricsScreen.isOpen ? lyricsScreen.close() : player.track && lyricsScreen.open()),
+    KeyQ: () => ctx.navigate("#/queue"),
     Slash: () => ctx.navigate("#/search"),
   };
   const action = actions[event.code];
@@ -237,6 +279,10 @@ function start() {
   }).catch((e) => e.status !== 401 && toast("Сервис VaginaWave недоступен"));
   route();
   setupDevices(player, document.getElementById("remote"));
+  // первый вход: сначала любимые артисты и предпочтения
+  get("/api/onboarding").then((data) => {
+    if (!data.done) onboarding.open(data);
+  }).catch(() => {});
 }
 
 applyInterface();

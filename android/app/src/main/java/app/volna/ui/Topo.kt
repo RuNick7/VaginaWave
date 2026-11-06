@@ -6,18 +6,22 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameMillis
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
 import app.volna.player.AudioLevel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlin.math.ceil
+import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
@@ -27,6 +31,10 @@ import kotlin.math.sin
  * Фон: топографические изолинии, которые медленно накатывают волной (порт web/topo.js).
  * Поле = наклон по вертикали + шум, изолинии строятся методом marching squares.
  * mode: live — обычное течение, calm — медленнее и тише, off — без линий.
+ *
+ * Анимация идёт на частоте экрана (до ~90 кадров; в calm — 30). Линии считаются в фоновом потоке,
+ * поток интерфейса только рисует готовые отрезки: прокрутка списков поверх фона не страдает. Каждый
+ * кадр просит одну перерисовку, без перекомпозиции, и память не выделяется: нет рывков от сборщика мусора.
  */
 @Composable
 fun Topo(modifier: Modifier = Modifier, mode: String = "live", dim: Boolean = false, playing: Boolean = false) {
@@ -44,33 +52,92 @@ fun Topo(modifier: Modifier = Modifier, mode: String = "live", dim: Boolean = fa
     val idle by animateFloatAsState(if (playing) 0.35f else 0f, tween(1200), label = "topo-energy")
     // «линии под музыку»: вместо ровного течения волна дышит громкостью того, что играет
     val react by rememberUpdatedState(UiPrefs.react && playing)
-    var loud by remember { mutableFloatStateOf(0f) }
-    val energy = if (react) loud else idle
-    var time by remember { mutableFloatStateOf((Math.random() * 100).toFloat()) }
-    val step = with(LocalDensity.current) { 12f * density }
+    val scene = remember { TopoScene() }
+    var frame by remember { mutableIntStateOf(0) }
+    val pixel = LocalDensity.current.density
+    val step = 12f * pixel
 
     LaunchedEffect(speed) {
         if (speed == 0f) return@LaunchedEffect
-        var last = withFrameMillis { it }
+        val minFrame = if (speed < 1f) 30_000_000L else 10_000_000L
+        var last = withFrameNanos { it }
         while (true) {
-            val now = withFrameMillis { it }
-            if (now - last >= 33) { // ~30 кадров в секунду достаточно и бережёт батарею
-                // громкость того, что звучит сейчас; удар — сразу, затихание — плавно, чтобы линии шли в такт
-                val target = if (react) AudioLevel.current() else 0f
-                loud += (target - loud) * (if (target > loud) 0.65f else 0.2f)
-                time += min((now - last) / 1000f, 0.1f) * (0.5f + energy * 2.2f) * speed
-                last = now
+            val now = withFrameNanos { it }
+            if (now - last < minFrame) continue
+            scene.advance(min((now - last) / 1e9f, 0.1f), if (react) AudioLevel.current() else idle, speed)
+            last = now
+            frame = scene.version // показать то, что фоновый поток успел посчитать к этому кадру
+            if (!scene.building && scene.width > 0f) {
+                scene.building = true
+                launch(Dispatchers.Default) { scene.build(step, pixel) }
             }
         }
     }
 
     Canvas(modifier) {
+        frame // каждый новый кадр анимации перерисовывает только холст
+        scene.width = size.width
+        scene.height = size.height
         if (alpha <= 0.01f) return@Canvas
+        drawIntoCanvas { scene.draw(it.nativeCanvas, density, alpha) }
+    }
+}
+
+/** Отрезки линий одним массивом: Canvas.drawLines рисует их пачкой, намного быстрее длинного Path. */
+private class Segments {
+    var points = FloatArray(8192)
+    var count = 0
+
+    fun add(x1: Float, y1: Float, x2: Float, y2: Float) {
+        if (count + 4 > points.size) points = points.copyOf(points.size * 2)
+        points[count] = x1
+        points[count + 1] = y1
+        points[count + 2] = x2
+        points[count + 3] = y2
+        count += 4
+    }
+}
+
+/** Линии одного кадра: два слоя — обычные и выделенные. */
+private class Lines {
+    val normal = Segments()
+    val accent = Segments()
+}
+
+private class TopoScene {
+    @Volatile private var time = (Math.random() * 100).toFloat()
+    @Volatile private var loud = 0f // огибающая громкости: высота рельефа и яркость линий
+    private var drive = 0f // ещё плавнее: скорость течения, чтобы линии не дёргались на каждый удар
+    private var field = FloatArray(0)
+    // два набора: фоновый поток пишет в back, холст рисует front; расчёт запускается из кадра
+    // анимации на главном потоке, поэтому в момент записи back никто не рисует
+    @Volatile private var front = Lines()
+    private var back = Lines()
+    @Volatile var version = 0
+        private set
+    @Volatile var building = false
+    @Volatile var width = 0f
+    @Volatile var height = 0f
+    private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.STROKE
+    }
+
+    /** Постоянные времени в секундах: от частоты кадров результат не зависит. */
+    fun advance(dt: Float, target: Float, speed: Float) {
+        loud += (target - loud) * (1f - exp(-dt / if (target > loud) ATTACK else RELEASE))
+        drive += (loud - drive) * (1f - exp(-dt / DRIVE))
+        time += dt * (0.5f + drive * 2.2f) * speed
+    }
+
+    fun build(step: Float, density: Float) {
         val t = time
-        val cols = ceil(size.width / step).toInt() + 1
-        val rows = ceil(size.height / step).toInt() + 1
-        val field = FloatArray(cols * rows)
-        val amp = 1f + energy * 0.9f
+        val normal = back.normal
+        val accent = back.accent
+        val cols = ceil(width / step).toInt() + 1
+        val rows = ceil(height / step).toInt() + 1
+        if (field.size != cols * rows) field = FloatArray(cols * rows)
+        val field = field
+        val amp = 1f + loud * RELIEF
         val px = step / density // поле считаем в dp, чтобы рисунок совпадал с веб-версией (там CSS-пиксели)
         for (r in 0 until rows) {
             val y = r * px
@@ -83,8 +150,8 @@ fun Topo(modifier: Modifier = Modifier, mode: String = "live", dim: Boolean = fa
                         swell * 0.2f)
             }
         }
-        val normal = Path()
-        val accent = Path()
+        normal.count = 0
+        accent.count = 0
         val spacing = 0.17f
         for (r in 0 until rows - 1) {
             val y0 = r * step
@@ -111,19 +178,19 @@ fun Topo(modifier: Modifier = Modifier, mode: String = "live", dim: Boolean = fa
                         val yb = y0 + step
                         val xr = x0 + step
                         when (index) {
-                            1, 14 -> path.segment(x0, ly, bx, yb)
-                            2, 13 -> path.segment(bx, yb, xr, ry)
-                            3, 12 -> path.segment(x0, ly, xr, ry)
-                            4, 11 -> path.segment(tx, y0, xr, ry)
-                            6, 9 -> path.segment(tx, y0, bx, yb)
-                            7, 8 -> path.segment(tx, y0, x0, ly)
+                            1, 14 -> path.add(x0, ly, bx, yb)
+                            2, 13 -> path.add(bx, yb, xr, ry)
+                            3, 12 -> path.add(x0, ly, xr, ry)
+                            4, 11 -> path.add(tx, y0, xr, ry)
+                            6, 9 -> path.add(tx, y0, bx, yb)
+                            7, 8 -> path.add(tx, y0, x0, ly)
                             5 -> {
-                                path.segment(tx, y0, xr, ry)
-                                path.segment(x0, ly, bx, yb)
+                                path.add(tx, y0, xr, ry)
+                                path.add(x0, ly, bx, yb)
                             }
                             10 -> {
-                                path.segment(tx, y0, x0, ly)
-                                path.segment(bx, yb, xr, ry)
+                                path.add(tx, y0, x0, ly)
+                                path.add(bx, yb, xr, ry)
                             }
                         }
                     }
@@ -131,15 +198,28 @@ fun Topo(modifier: Modifier = Modifier, mode: String = "live", dim: Boolean = fa
                 }
             }
         }
-        val width = 1f * density
-        drawPath(normal, Color.White.copy(alpha = (0.12f + energy * 0.1f) * alpha), style = Stroke(width))
-        drawPath(accent, Color.White.copy(alpha = (0.32f + energy * 0.3f) * alpha), style = Stroke(width))
+        val done = back
+        back = front
+        front = done
+        version++
+        building = false
     }
-}
 
-private fun Path.segment(x1: Float, y1: Float, x2: Float, y2: Float) {
-    moveTo(x1, y1)
-    lineTo(x2, y2)
+    fun draw(canvas: android.graphics.Canvas, density: Float, alpha: Float) {
+        val lines = front
+        paint.strokeWidth = density
+        paint.color = Color.White.copy(alpha = ((0.12f + loud * 0.1f) * alpha).coerceIn(0f, 1f)).toArgb()
+        canvas.drawLines(lines.normal.points, 0, lines.normal.count, paint)
+        paint.color = Color.White.copy(alpha = ((0.32f + loud * 0.3f) * alpha).coerceIn(0f, 1f)).toArgb()
+        canvas.drawLines(lines.accent.points, 0, lines.accent.count, paint)
+    }
+
+    private companion object {
+        const val ATTACK = 0.12f // удар поднимает рельеф мягко, но заметно
+        const val RELEASE = 0.55f // а опускается он плавно
+        const val DRIVE = 0.8f
+        const val RELIEF = 0.55f // насколько громкость поднимает рельеф (было 0.9: линии прыгали)
+    }
 }
 
 /** 3D simplex noise (алгоритм Стефана Густавсона). */

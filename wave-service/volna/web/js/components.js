@@ -1,5 +1,6 @@
 // Общие куски интерфейса: строки треков, карточки, полки, шапки страниц, настройки волны.
 import { cover, duration, h, icon } from "./dom.js";
+import { queueSwipe } from "./gestures.js";
 
 export function pageHeader(title, { back = false, actions = [] } = {}) {
   return h(
@@ -24,65 +25,164 @@ export function setTrackActions(handler) {
   trackActions = handler;
 }
 
-export function trackRow(track, { number, onPlay, player, showCover = true } = {}) {
+/** Ссылка внутри нажимаемой строки или карточки: своё нажатие, строку не запускает. */
+function innerLink(cls, text, hash) {
+  return h("span", {
+    class: `${cls} is-link`,
+    onClick: (event) => {
+      event.stopPropagation();
+      location.hash = hash;
+    },
+  }, text);
+}
+
+/** Строка и карточка — не <button>: внутри них есть ссылки на артиста, а вложенные кнопки не работают. */
+function pressable(onPress) {
+  return {
+    role: "button",
+    tabindex: "0",
+    onClick: onPress,
+    onKeydown: (event) => {
+      if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+      event.preventDefault();
+      onPress(event);
+    },
+  };
+}
+
+export function trackRow(track, { number, onPlay, player, showCover = true, queueable = true } = {}) {
   const current = player?.track?.id === track.id;
-  return h(
+  const row = h(
     "div",
     { class: `track${current ? " is-current" : ""}`, dataset: { id: track.id } },
+    h("span", { class: "track__swipe", "aria-hidden": "true" }, icon("queue"), "В очередь"),
     h(
-      "button",
-      { class: "track__main", type: "button", onClick: onPlay },
+      "div",
+      { class: "track__main", ...pressable(onPlay) },
       number !== undefined ? h("span", { class: "track__no" }, current ? icon("wave") : String(number)) : null,
       showCover ? cover(track.cover, "cover--sm") : null,
       h(
         "span",
         { class: "track__text" },
         h("span", { class: "track__title" }, track.title),
-        h("span", { class: "track__sub" }, track.reason || track.artist),
+        track.reason || !track.artist_id
+          ? h("span", { class: "track__sub" }, track.reason || track.artist)
+          : innerLink("track__sub", track.artist, `#/artist/${encodeURIComponent(track.artist_id)}`),
       ),
       track.liked ? icon("heart", "track__liked") : null,
       h("span", { class: "track__time" }, duration(track.duration)),
     ),
+    queueable && player
+      ? h("button", { class: "icon-btn track__queue", type: "button", "aria-label": `В очередь: ${track.title}`, title: "В очередь", onClick: () => player.enqueue(track) }, icon("queue"))
+      : null,
     trackActions
       ? h("button", { class: "icon-btn track__more", type: "button", "aria-label": `Действия: ${track.title}`, onClick: () => trackActions(track) }, icon("more"))
       : null,
   );
+  if (queueable && player) queueSwipe(row, track, player);
+  return row;
 }
 
-export function trackList(tracks, { player, context, numbered = false, showCover = true } = {}) {
+/** Длинные списки показываем порциями, как только прокрутка доходит до конца: иначе страница тормозит. */
+function inBatches(box, count, size, append) {
+  let shown = 0;
+  const sentinel = h("div", { class: "batch-end" });
+  const observer = new IntersectionObserver((entries) => {
+    if (entries.some((e) => e.isIntersecting)) more();
+  }, { root: document.getElementById("view"), rootMargin: "800px" });
+  function more() {
+    const end = Math.min(shown + size, count);
+    for (; shown < end; shown++) append(shown);
+    box.append(sentinel);
+    if (shown >= count) {
+      observer.disconnect();
+      sentinel.remove();
+    }
+  }
+  more();
+  if (shown < count) observer.observe(sentinel);
+  return observer;
+}
+
+/**
+ * Список треков. show — сколько строк видно сначала (у артиста: «Все треки» открывает остальные);
+ * играет всегда весь список. before(track) — вызывается перед запуском (история поиска).
+ */
+export function trackList(tracks, { player, context, numbered = false, showCover = true, show, before } = {}) {
   const list = h("div", { class: "tracks" });
-  tracks.forEach((track, i) => {
-    list.append(
-      trackRow(track, {
-        number: numbered ? track.track_no || i + 1 : undefined,
-        showCover,
-        player,
-        onPlay: () => player.playList(tracks, i, context),
-      }),
-    );
+  const makeRow = (i) => trackRow(tracks[i], {
+    number: numbered ? tracks[i].track_no || i + 1 : undefined,
+    showCover,
+    player,
+    onPlay: () => {
+      before?.(tracks[i]);
+      player.playList(tracks, i, context);
+    },
   });
+  let observer = null;
+  const fill = (count) => {
+    observer?.disconnect();
+    list.replaceChildren();
+    observer = inBatches(list, count, 100, (i) => list.append(makeRow(i)));
+  };
+  fill(show ? Math.min(show, tracks.length) : tracks.length);
+  list.showAll = () => fill(tracks.length);
+  list.markLiked = () => fill(list.querySelectorAll(".track").length);
+  list.showFirst = () => fill(Math.min(show, tracks.length));
   // подсветка текущего трека без перерисовки всего списка
   const sync = () => {
     for (const row of list.children) row.classList.toggle("is-current", row.dataset.id === player.track?.id);
   };
   player.addEventListener("change", sync);
-  list.cleanup = () => player.removeEventListener("change", sync);
+  list.cleanup = () => {
+    observer?.disconnect();
+    player.removeEventListener("change", sync);
+  };
   return list;
 }
 
 export function card(item, { onClick } = {}) {
   const round = item.type === "artist";
+  const sub = item.subtitle || item.artist;
   return h(
-    "button",
-    { class: `card card--${item.type}`, type: "button", onClick },
+    "div",
+    { class: `card card--${item.type}`, ...pressable(onClick) },
     cover(item.cover, round ? "cover--round" : ""),
     h("span", { class: "card__title" }, item.title),
-    item.subtitle || item.artist ? h("span", { class: "card__sub" }, item.subtitle || item.artist) : null,
+    sub && item.type === "album" && item.artist_id
+      ? innerLink("card__sub", sub, `#/artist/${encodeURIComponent(item.artist_id)}`)
+      : sub ? h("span", { class: "card__sub" }, sub) : null,
   );
 }
 
 export function grid(items, onItem) {
-  return h("div", { class: "grid" }, ...items.map((item) => card(item, { onClick: () => onItem(item) })));
+  const box = h("div", { class: "grid" });
+  box.observer = inBatches(box, items.length, 120, (i) => box.append(card(items[i], { onClick: () => onItem(items[i]) })));
+  return box;
+}
+
+/** Поиск внутри раздела коллекции: фильтрует то, что уже загружено, сразу при вводе. */
+export function filterField(value, placeholder, onChange) {
+  const input = h("input", { class: "search__input", type: "search", placeholder, "aria-label": placeholder, autocomplete: "off", value });
+  input.addEventListener("input", () => onChange(input.value));
+  return h("label", { class: "search" }, icon("search"), input);
+}
+
+export function matches(query, ...fields) {
+  const norm = (s) => (s || "").toLowerCase().replaceAll("ё", "е");
+  const q = norm(query).trim();
+  return !q || fields.some((f) => norm(f).includes(q));
+}
+
+/** «Показать все · N» / «Свернуть» под длинным списком. */
+export function showMore(label, onToggle) {
+  let open = false;
+  const button = h("button", { class: "btn show-more", type: "button", onClick: () => {
+    open = !open;
+    button.textContent = open ? "Свернуть" : label;
+    onToggle(open);
+  } }, label);
+  return h("div", { class: "show-more__box" }, button);
 }
 
 export function shelf(title, items, onItem) {
@@ -188,7 +288,7 @@ export function waveSummary(s) {
 
 const DEFAULT_SETTINGS = {
   character: "balanced", mood: "any", activity: "any", no_vocals: false,
-  temperature: null, diversity: 0.5, repeat_days: null, context_aware: true, steer: 0.65,
+  temperature: null, diversity: 0.5, repeat_days: null, context_aware: true, steer: 0.65, similar_only: false,
 };
 
 export function waveSettingsPanel(player, { onShake } = {}) {
@@ -209,6 +309,8 @@ export function waveSettingsPanel(player, { onShake } = {}) {
   const mood = chips(WAVE_LABELS.mood, s.mood, (v) => change({ mood: v }));
   const activity = chips(WAVE_LABELS.activity, s.activity, (v) => change({ activity: v }));
   const noVocals = toggle("Без слов", s.no_vocals, (v) => change({ no_vocals: v }));
+  const steered = player.kind === "steer" && player.title;
+  const similarOnly = toggle(steered ? `Только похожее на «${player.title}»` : "Волна по треку: только похожее", s.similar_only, (v) => change({ similar_only: v }));
   const context = toggle("Учитывать время суток и выходные", s.context_aware, (v) => change({ context_aware: v }));
   const temperature = slider({
     label: "Смелость подбора", min: 0.1, max: 1.5, step: 0.05, value: s.temperature ?? defaults().temperature,
@@ -241,26 +343,30 @@ export function waveSettingsPanel(player, { onShake } = {}) {
     diversity.setValue(s.diversity);
     repeat.setValue(r, `${r === 0 ? "можно сразу" : `${Math.round(r)} дн.`}${s.repeat_days == null ? " · авто" : ""}`);
     steer.setValue(s.steer);
+    steer.hidden = Boolean(s.similar_only);
+    steerHint.hidden = Boolean(s.similar_only);
   }
+
+  const steerHint = h("p", { class: "hint" }, "Сколько в волне по треку, альбому или плейлисту — и в продолжении после них — похожего на источник. Остальное — ваш вкус, подтянутый к нему. Пропуски похожего ослабляют смещение на ходу.");
 
   const panel = h(
     "div",
     { class: "wave-settings" },
     group("Характер", character, hint),
     group("Настроение", mood),
-    group("Занятие", activity),
-    group(null, noVocals),
+    group(null, noVocals, similarOnly),
     group(
       "Тонкая настройка",
       temperature,
       diversity,
       repeat,
       steer,
-      h("p", { class: "hint" }, "Сколько в волне по треку, альбому или плейлисту — и в продолжении после них — похожего на источник. Остальное — ваш вкус, подтянутый к нему. Пропуски похожего ослабляют смещение на ходу."),
+      steerHint,
       context,
       h("button", { class: "link-btn", type: "button", onClick: () => change({ temperature: null, repeat_days: null, diversity: 0.5 }) },
         "Вернуть значения характера"),
     ),
+    group("Занятие", activity),
     onShake ? h("button", { class: "wide-btn", type: "button", onClick: onShake }, "Встряхнуть волну") : null,
   );
   render();

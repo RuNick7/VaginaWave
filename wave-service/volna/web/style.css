@@ -851,3 +851,221 @@ body[data-route="login"] .mini { display: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* --- главная: кнопка играть в ряду, инструменты, ссылки --- */
+
+.ctl--primary { width: 64px; height: 64px; background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.ctl--primary:hover { background: rgba(255, 255, 255, 0.86); }
+.controls { align-items: center; }
+
+.hero__art { display: flex; justify-content: center; width: 100%; }
+.hero__tools { display: flex; align-items: center; justify-content: center; gap: 6px; max-width: 100%; }
+.hero__tools .tune-pill { min-width: 0; }
+.hero__tools .icon-btn[aria-pressed="true"] { color: var(--fg); }
+.hero__link { font-size: 14px; padding: 4px 12px; color: var(--fg); }
+.hero__link:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+.caption { width: 100%; }
+button.caption__title, button.caption__sub { display: block; width: 100%; text-align: center; }
+button.caption__title:not(:disabled):hover, button.caption__sub:not(:disabled):hover { text-decoration: underline; text-underline-offset: 3px; }
+button.caption__title:disabled, button.caption__sub:disabled { cursor: default; color: inherit; }
+button.caption__sub:disabled { color: var(--muted); }
+
+/* --- текст песни --- */
+
+.lyrics {
+  position: relative;
+  overflow-y: auto;
+  scrollbar-width: none;
+  overscroll-behavior: contain;
+}
+.lyrics::-webkit-scrollbar { display: none; }
+
+.lyrics__line {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 5px 0;
+  text-align: center;
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--fg);
+  transition: color 0.25s ease, opacity 0.25s ease;
+  overflow-wrap: anywhere;
+}
+.lyrics.is-synced .lyrics__line { color: var(--muted); }
+.lyrics.is-synced .lyrics__line.is-past { opacity: 0.45; }
+.lyrics.is-synced .lyrics__line.is-active { color: var(--fg); opacity: 1; }
+button.lyrics__line:hover { color: var(--fg); }
+
+.lyrics-panel { position: relative; width: min(520px, 100%); }
+.lyrics-panel .lyrics {
+  height: min(38dvh, 340px);
+  padding: 0 40px;
+  -webkit-mask-image: linear-gradient(transparent, #000 12%, #000 88%, transparent);
+  mask-image: linear-gradient(transparent, #000 12%, #000 88%, transparent);
+}
+.lyrics-panel__expand { position: absolute; top: 0; right: 0; color: var(--fg); }
+
+.lyrics-full {
+  position: fixed;
+  inset: 0;
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  padding: max(8px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+}
+.lyrics-full__head { display: flex; align-items: center; gap: 8px; }
+.lyrics-full__head .icon-btn { color: var(--fg); flex: none; }
+.lyrics-full__spacer { width: 40px; flex: none; }
+.lyrics-full__text { flex: 1; min-width: 0; text-align: center; }
+.lyrics-full__title, .lyrics-full__artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lyrics-full__title { font-size: 16px; font-weight: 600; }
+.lyrics-full__artist { font-size: 13px; color: var(--muted); }
+.lyrics-full__body { position: relative; flex: 1; min-height: 0; width: min(760px, 100%); margin: 0 auto; }
+.lyrics-full__none { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; font-size: 18px; color: var(--muted); }
+.lyrics--big { height: 100%; padding: 16px 8px 45vh; }
+.lyrics--big .lyrics__line { font-size: clamp(24px, 4.5vw, 34px); font-weight: 700; line-height: 1.28; padding: 9px 0; text-align: left; }
+.lyrics-full__foot { display: flex; flex-direction: column; align-items: center; gap: 8px; padding-top: 10px; }
+.lyrics-full__times { display: flex; justify-content: space-between; width: min(320px, 82vw); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* --- строки и карточки: ссылки внутри, очередь --- */
+
+.track { position: relative; }
+.track__main { cursor: pointer; }
+.track > .track__main, .track > .icon-btn { transform: translateX(var(--swipe, 0)); }
+.track.is-swiping > .track__main, .track.is-swiping > .icon-btn { background: var(--bg); }
+.track__swipe {
+  display: none;
+  position: absolute;
+  inset: 0 auto 0 8px;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--muted);
+}
+.track.is-swiping .track__swipe { display: flex; }
+.track.is-armed .track__swipe { color: var(--fg); }
+.track__queue { width: 36px; height: 36px; display: none; }
+@media (hover: hover) {
+  .track:hover .track__queue { display: grid; }
+}
+.card { cursor: pointer; }
+.is-link:hover { color: var(--fg); text-decoration: underline; text-underline-offset: 2px; }
+.batch-end { height: 1px; }
+.show-more__box { display: flex; justify-content: center; margin-top: 12px; }
+
+/* --- очередь --- */
+
+.queue-head { display: flex; justify-content: space-between; align-items: baseline; }
+.queue-row { display: flex; align-items: center; border-radius: 10px; background: var(--bg); }
+.queue-row .track { flex: 1; min-width: 0; margin: 0; width: auto; }
+.queue-row .icon-btn { flex: none; }
+.queue-row.is-lifted { position: relative; z-index: 1; background: #151515; }
+.queue-grip { display: grid; place-items: center; width: 40px; height: 40px; flex: none; color: var(--muted); cursor: grab; touch-action: none; }
+.queue-row.is-lifted .queue-grip { cursor: grabbing; color: var(--fg); }
+
+/* --- поиск: крестик и история --- */
+
+.search__clear { width: 34px; height: 34px; margin-right: -6px; }
+.history-row__icon { display: grid; place-items: center; width: 44px; height: 44px; flex: none; color: var(--muted); }
+button.track__main { text-align: left; }
+.section-title .link-btn { font-size: 14px; }
+
+/* --- импорт и докачка --- */
+
+.import-label { margin-top: 20px; }
+.import-row, .found-artist {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--faint);
+}
+.import-row__note { font-size: 13px; color: var(--muted); }
+.import-row__missing { opacity: 0.6; }
+.found-artist__cover { width: 56px; }
+.found-artist__overview {
+  font-size: 12px;
+  color: var(--muted);
+  opacity: 0.7;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.found-artist__action { flex: none; }
+.discography { margin-bottom: 8px; }
+.discography .hint { margin: 0; }
+.spinner {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border: 2px solid var(--faint);
+  border-top-color: var(--fg);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+/* --- первый вход --- */
+
+.onboarding {
+  position: fixed;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  padding-top: env(safe-area-inset-top);
+}
+.onboarding__loading { flex: 1; display: grid; place-items: center; }
+.onboarding__head { padding: 20px 16px 8px; width: min(900px, 100%); margin: 0 auto; }
+.onboarding__title { margin: 0 0 6px; font-size: 30px; font-weight: 700; letter-spacing: -0.02em; }
+.onboarding__scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 16px 24px; }
+.onboarding__prefs { width: min(640px, 100%); margin: 0 auto; padding-top: 20px; }
+.onboarding__foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: min(900px, 100%);
+  margin: 0 auto;
+  padding: 12px 16px max(12px, env(safe-area-inset-bottom));
+}
+.bubbles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 18px 8px;
+  width: min(868px, 100%);
+  margin: 0 auto;
+}
+.bubble { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; text-align: center; }
+.bubble__img { position: relative; width: 92px; transition: transform 0.2s ease; }
+.bubble.is-on .bubble__img { transform: scale(1.06); }
+.bubble.is-on .cover { border: 2px solid var(--fg); }
+.bubble__check {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--fg);
+  color: var(--bg);
+}
+.bubble__check .ic { width: 16px; height: 16px; }
+.bubble__name {
+  font-size: 13px;
+  line-height: 1.25;
+  color: var(--muted);
+  max-width: 100%;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.bubble.is-on .bubble__name { color: var(--fg); font-weight: 600; }

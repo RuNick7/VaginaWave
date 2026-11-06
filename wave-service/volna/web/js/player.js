@@ -2,6 +2,10 @@
 // * wave — очередь держит сервер: на каждое окончание трека сообщаем, чем всё кончилось, и получаем следующий;
 // * list — обычная очередь из альбома, плейлиста или поиска. Прослушивания всё равно уходят в /api/events,
 //   а когда список закончился, плеер просит у сервера продолжение похожим на весь список.
+//
+// Очередь, как в Spotify: добавленные вручную треки играют раньше волны и списка. Уходя с трека волны
+// в очередь, сообщаем серверу, чем он кончился, а его следующий трек откладываем (resume): с него
+// волна и продолжится, когда очередь закончится.
 import { get, post, put, rel } from "./api.js";
 import { toast } from "./dom.js";
 
@@ -22,6 +26,10 @@ export class Player extends EventTarget {
     this.busy = false;
     this.loading = false;
     this.handoffWave = false; // музыку забрали с устройства, где играла волна: после её треков — волна
+    this.queue = []; // добавлено вручную: играет раньше волны и списка
+    this.fromQueue = false; // текущий трек — из очереди
+    this.resume = null; // с чего продолжить волну или список после очереди
+    this.resumeEnd = false; // список кончился, пока играла очередь: дальше — продолжение волной
     // «Назад» в волне: сыгранные треки (history) и те, к которым надо вернуться (forward).
     // Пока forward не пуст, мы переслушиваем прошлое и сервер волны не трогаем.
     this.history = [];
@@ -62,6 +70,7 @@ export class Player extends EventTarget {
     this.handoffWave = false;
     this.history = [];
     this.forward = [];
+    this.leaveQueue(); // новая волна начинается сразу; добавленное в очередь сыграет после её первого трека
     this.setLoading(true);
     try {
       this.applyWave(await post("/api/wave/start", { device: "web", ...options }));
@@ -83,6 +92,7 @@ export class Player extends EventTarget {
     this.list = tracks;
     this.index = Math.max(0, Math.min(index, tracks.length - 1));
     this.context = context;
+    this.leaveQueue();
     this.setTrack(this.list[this.index]);
     await this.play();
   }
@@ -126,14 +136,29 @@ export class Player extends EventTarget {
         this.remember(this.track);
         this.setTrack(this.forward.pop());
         await this.play();
+      } else if (this.fromQueue) {
+        this.report(report, { type: "queue" });
+        this.remember(this.track);
+        await this.afterQueued();
       } else if (this.mode === "wave") {
         const finished = this.track;
-        this.applyWave(await post(`/api/wave/${this.session}/advance`, report));
+        const data = await post(`/api/wave/${this.session}/advance`, report);
         this.remember(finished);
-        await this.play();
+        if (this.queue.length) {
+          this.stash(data);
+          await this.playQueued();
+        } else {
+          this.applyWave(data);
+          await this.play();
+        }
       } else {
         this.report(report, this.context);
-        if (this.index + 1 < this.list.length) {
+        if (this.queue.length) {
+          this.index += 1;
+          this.resume = this.list[this.index] || null;
+          this.resumeEnd = !this.resume;
+          await this.playQueued();
+        } else if (this.index + 1 < this.list.length) {
           this.index += 1;
           this.setTrack(this.list[this.index]);
           await this.play();
@@ -152,10 +177,10 @@ export class Player extends EventTarget {
     }
   }
 
-  /** «Назад»: в начало трека, если он играет дольше 3 секунд, иначе — к предыдущему. */
-  async previous() {
+  /** «Назад»: кнопка сначала перематывает трек в начало (если он играет дольше 3 секунд), свайп — нет. */
+  async previous(restartFirst = true) {
     if (!this.track) return;
-    if (this.position > 3) {
+    if ((restartFirst && this.position > 3) || this.fromQueue) { // трек из очереди — только в начало
       this.audio.currentTime = 0;
       return;
     }
@@ -240,6 +265,90 @@ export class Player extends EventTarget {
     if (this.duration) this.audio.currentTime = fraction * this.duration;
   }
 
+  // --- очередь ---
+
+  /** В конец очереди; если ничего не играет — сразу. */
+  enqueue(track) {
+    this.queue.push(track);
+    if (!this.track) {
+      this.playQueued();
+    }
+    toast(`«${track.title}» — в очереди`);
+    this.emit();
+  }
+
+  /** Сразу после текущего трека. */
+  playNext(track) {
+    if (!this.track) return this.enqueue(track);
+    this.queue.unshift(track);
+    toast(`«${track.title}» сыграет следующим`);
+    this.emit();
+  }
+
+  moveInQueue(from, to) {
+    if (from === to || !this.queue[from] || !this.queue[to]) return;
+    this.queue.splice(to, 0, this.queue.splice(from, 1)[0]);
+    this.emit();
+  }
+
+  removeFromQueue(position) {
+    this.queue.splice(position, 1);
+    this.emit();
+  }
+
+  clearQueue() {
+    this.queue = [];
+    this.emit();
+  }
+
+  /** Нажали на трек в очереди: всё, что было перед ним, пропускаем, и он играет сейчас. */
+  playFromQueue(position) {
+    this.queue.splice(0, position);
+    return this.next("skip");
+  }
+
+  async playQueued() {
+    this.fromQueue = true;
+    this.setTrack(this.queue.shift());
+    await this.play();
+  }
+
+  /** Трек из очереди доиграл: следующий из очереди или туда, где остановились волна и список. */
+  async afterQueued() {
+    if (this.queue.length) return this.playQueued();
+    const { resume, resumeEnd } = this;
+    this.leaveQueue();
+    if (resumeEnd) return this.continueAfterList();
+    if (resume) {
+      this.setTrack(resume);
+      return this.play();
+    }
+    if (this.mode === "wave") return this.startWave();
+    this.setTrack(null);
+  }
+
+  leaveQueue() {
+    this.fromQueue = false;
+    this.resume = null;
+    this.resumeEnd = false;
+  }
+
+  /** Волна ушла на трек вперёд, но сначала доиграет очередь. */
+  stash(data) {
+    this.session = data.session;
+    this.kind = data.kind;
+    this.title = data.title || "";
+    this.upcoming = data.upcoming || [];
+    if (data.settings) this.settings = data.settings;
+    this.resume = data.track;
+  }
+
+  /** Что заиграет, когда кончится очередь. */
+  get upNext() {
+    if (this.mode === "wave") return [...(this.fromQueue && this.resume ? [this.resume] : []), ...this.upcoming];
+    return this.fromQueue ? this.list.slice(this.index) : this.list.slice(this.index + 1);
+  }
+
   // --- реакции ---
 
   async like() {
@@ -248,7 +357,7 @@ export class Player extends EventTarget {
     this.track.liked = liked;
     this.emit();
     try {
-      if (this.mode === "wave" && !this.replaying) {
+      if (this.mode === "wave" && !this.replaying && !this.fromQueue && this.session) {
         this.applyWave(await post(`/api/wave/${this.session}/like`, { track_id: this.track.id, liked }));
       } else {
         await post("/api/like", { type: "track", id: this.track.id, liked });
@@ -293,6 +402,11 @@ export class Player extends EventTarget {
     this.title = data.title || "";
     this.upcoming = data.upcoming || [];
     if (data.settings) this.settings = data.settings;
+    if (this.fromQueue) { // играет очередь: волна обновилась (настройки, «встряхнуть») и подождёт
+      this.resume = data.track;
+      this.emit();
+      return;
+    }
     if (this.replaying) {
       this.emit(); // переслушиваем прошлое: сервер знает про очередь, но играет сейчас не она
       return;
@@ -325,14 +439,15 @@ export class Player extends EventTarget {
 
   get nextUp() {
     if (this.replaying) return this.forward[this.forward.length - 1];
+    if (this.queue.length) return this.queue[0];
+    if (this.fromQueue) return this.resumeEnd ? null : this.resume;
     if (this.mode === "wave") return this.upcoming[0] || null;
     return this.list[this.index + 1] || null;
   }
 
   /** Что будет после текущего трека: для другого устройства, если оно заберёт музыку. */
   upNextIds(limit) {
-    const rest = this.mode === "wave" ? this.upcoming : this.list.slice(this.index + 1);
-    return rest.slice(0, limit).map((t) => t.id);
+    return [...this.queue, ...this.upNext].slice(0, limit).map((t) => t.id);
   }
 
   /** Откуда играет: «Моя волна», название альбома или плейлиста. */
@@ -342,6 +457,7 @@ export class Player extends EventTarget {
   }
 
   get reason() {
+    if (this.fromQueue) return "Из очереди";
     if (this.mode === "list" && this.context?.id === "handoff") return `Продолжаю с «${this.context.title}»`;
     if (this.mode === "list") return this.context?.title ? `${contextLabel(this.context.type)}: ${this.context.title}` : "";
     return this.track?.reason || "";
@@ -368,7 +484,7 @@ export class Player extends EventTarget {
       const context = new (window.AudioContext || window.webkitAudioContext)();
       const source = context.createMediaElementSource(this.audio);
       this.analyser = context.createAnalyser();
-      this.analyser.fftSize = 512;
+      this.analyser.fftSize = 2048; // окно 46 мс: громкость без дрожи отдельных пиков
       this.samples = new Uint8Array(this.analyser.fftSize);
       source.connect(this.analyser);
       this.analyser.connect(context.destination);

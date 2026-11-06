@@ -21,6 +21,8 @@ import kotlin.math.sqrt
 object AudioLevel : TeeAudioProcessor.AudioBufferSink {
     private const val CHUNK_US = 20_000L
     private const val SIZE = 1024 // ~20 с по 20 мс: с запасом на любой буфер
+    private const val WINDOW = 3
+    private const val LOOK_AHEAD_US = 90_000L
 
     private val lock = Any()
     private val times = LongArray(SIZE)
@@ -37,20 +39,28 @@ object AudioLevel : TeeAudioProcessor.AudioBufferSink {
     @Volatile private var playedUs = C.TIME_UNSET // что звучит, по аудиовыходу
     @Volatile private var playedAtNs = 0L
 
-    /** Громкость того, что слышно сейчас: 0 — тишина, 1 — громко; та же шкала, что у веб-плеера. */
+    /**
+     * Громкость того, что слышно сейчас: 0 — тишина, 1 — громко; та же шкала, что у веб-плеера.
+     * Среднее по трём кускам (60 мс) без дрожи отдельных пиков. Берём чуть наперёд: линии плавно
+     * разгоняются к удару, и упреждение возвращает на бит то, что отнимает их плавность.
+     */
     fun current(): Float {
         val played = playedUs
         synchronized(lock) {
             if (count == 0) return 0f
             val latest = (head - 1 + SIZE) % SIZE
-            if (played == C.TIME_UNSET) return levels[latest]
             // между отчётами аудиовыхода время идёт само; дальше 0,3 с не угадываем
-            val now = played + min((System.nanoTime() - playedAtNs) / 1000, 300_000L)
+            val now = if (played == C.TIME_UNSET) Long.MAX_VALUE
+            else played + min((System.nanoTime() - playedAtNs) / 1000, 300_000L) + LOOK_AHEAD_US
+            var sum = 0f
+            var taken = 0
             for (k in 0 until count) {
                 val i = (latest - k + SIZE) % SIZE
-                if (times[i] <= now) return levels[i]
+                if (times[i] > now) continue
+                sum += levels[i]
+                if (++taken == WINDOW) break
             }
-            return 0f
+            return if (taken > 0) sum / taken else 0f
         }
     }
 

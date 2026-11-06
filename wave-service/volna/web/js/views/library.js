@@ -1,7 +1,7 @@
-// Коллекция: «Мне нравится», плейлисты, альбомы, артисты, недавно слушали.
+// Коллекция: «Мне нравится», плейлисты, альбомы, артисты, недавно слушали, пополнение библиотеки.
 import { get } from "../api.js";
 import { h, icon, plural } from "../dom.js";
-import { chips, empty, grid, loading, pageHeader, sectionTitle, trackList } from "../components.js";
+import { chips, empty, filterField, grid, loading, matches, pageHeader, sectionTitle, trackList } from "../components.js";
 
 const SECTIONS = [
   ["liked", "Мне нравится", "heart"],
@@ -10,6 +10,12 @@ const SECTIONS = [
   ["artists", "Артисты", "artist"],
   ["recent", "Недавно слушали", "clock"],
 ];
+const FEEDS = [
+  ["#/import", "Импорт из Spotify", "playlist", "Плейлист или альбом по ссылке"],
+  ["#/add-artist", "Добавить исполнителя", "artist", "Скачать дискографию через Lidarr"],
+];
+// что было в поиске раздела и какая сортировка: «назад» из альбома возвращает всё как было
+const filterMemory = {};
 
 export function renderLibrary(root, ctx, section) {
   if (!section) return renderRoot(root, ctx);
@@ -34,6 +40,13 @@ function renderRoot(root, { navigate }) {
           icon("chevron", "tile__chevron"),
         ),
       ),
+      ...FEEDS.map(([hash, label, ic, sub]) =>
+        h("button", { class: "tile tile--tall", type: "button", onClick: () => navigate(hash) },
+          icon(ic, "tile__icon"),
+          h("span", { class: "tile__text" }, h("span", { class: "tile__title" }, label), h("span", { class: "tile__sub" }, sub)),
+          icon("chevron", "tile__chevron"),
+        ),
+      ),
     );
   };
   renderTiles();
@@ -55,6 +68,7 @@ function renderRoot(root, { navigate }) {
 function renderTracks(root, { player }, section) {
   const title = section === "liked" ? "Мне нравится" : "Недавно слушали";
   const body = h("div", {}, loading());
+  const found = h("div", {});
   root.append(pageHeader(title, { back: true }), body);
   let cleanup = () => {};
   get(`/api/library/${section}`)
@@ -64,13 +78,30 @@ function renderTracks(root, { player }, section) {
         return;
       }
       const context = { type: "library", id: section, title };
-      const list = trackList(tracks, { player, context });
-      cleanup = list.cleanup;
+      const render = () => {
+        cleanup();
+        const shown = tracks.filter((t) => matches(filterMemory[section], t.title, t.artist, t.album));
+        if (!shown.length) {
+          cleanup = () => {};
+          found.replaceChildren(empty("Ничего не нашлось."));
+          return;
+        }
+        const list = trackList(shown, { player, context });
+        cleanup = list.cleanup;
+        found.replaceChildren(
+          h("p", { class: "page-meta" }, `${shown.length} ${plural(shown.length, ["трек", "трека", "треков"])}`),
+          actionRow(player, shown, context),
+          list,
+        );
+      };
       body.replaceChildren(
-        h("p", { class: "page-meta" }, `${tracks.length} ${plural(tracks.length, ["трек", "трека", "треков"])}`),
-        actionRow(player, tracks, context),
-        list,
+        filterField(filterMemory[section] || "", `Найти в «${title}»`, (v) => {
+          filterMemory[section] = v;
+          render();
+        }),
+        found,
       );
+      render();
     })
     .catch((error) => body.replaceChildren(empty(error.message)));
   return () => cleanup();
@@ -98,29 +129,59 @@ function renderArtists(root, ctx) {
   return renderSortedGrid(root, ctx, "artists", "Артисты", ARTIST_SORTS, "artist");
 }
 
+/** Сетка с поиском: показывает только то, что подходит под запрос. */
+function filteredGrid(body, kind, title, items, open, none) {
+  const found = h("div", {});
+  let current = null;
+  const render = () => {
+    current?.observer?.disconnect();
+    const shown = items.filter((i) => matches(filterMemory[kind], i.title, i.subtitle));
+    current = shown.length ? grid(shown, open) : null;
+    found.replaceChildren(current || empty(items.length ? "Ничего не нашлось." : none));
+  };
+  body.replaceChildren(
+    ...(items.length ? [filterField(filterMemory[kind] || "", `Найти в «${title}»`, (v) => {
+      filterMemory[kind] = v;
+      render();
+    })] : []),
+    found,
+  );
+  render();
+  return () => current?.observer?.disconnect();
+}
+
 function renderSortedGrid(root, { navigate }, kind, title, sorts, type) {
   const body = h("div", {}, loading());
+  let cleanup = () => {};
   const load = (sort) => {
     sortMemory[kind] = sort;
+    cleanup();
     body.replaceChildren(loading());
-    get(`/api/library/${kind}?sort=${sort}&limit=300`)
+    get(`/api/library/${kind}?sort=${sort}&limit=5000`)
       .then(({ items }) => {
         const open = (item) => navigate(`#/${type}/${encodeURIComponent(item.id)}`);
-        body.replaceChildren(items.length ? grid(items, open) : empty("Здесь пока пусто."));
+        cleanup = filteredGrid(body, kind, title, items, open, "Здесь пока пусто.");
       })
       .catch((error) => body.replaceChildren(empty(error.message)));
   };
   root.append(pageHeader(title, { back: true }), chips(sorts, sortMemory[kind], load), body);
   load(sortMemory[kind]);
+  return () => cleanup();
 }
 
 function renderPlaylists(root, { navigate }) {
   const body = h("div", {}, loading());
-  root.append(pageHeader("Плейлисты", { back: true }), body);
+  let cleanup = () => {};
+  root.append(
+    pageHeader("Плейлисты", { back: true }),
+    h("div", { class: "actions" }, h("button", { class: "btn", type: "button", onClick: () => navigate("#/import") }, icon("playlist"), "Импорт из Spotify")),
+    body,
+  );
   get("/api/library/playlists")
     .then(({ items }) => {
       const open = (item) => navigate(`#/playlist/${encodeURIComponent(item.id)}`);
-      body.replaceChildren(items.length ? grid(items, open) : empty("Плейлистов пока нет: их можно создать в Navidrome."));
+      cleanup = filteredGrid(body, "playlists", "Плейлисты", items, open, "Плейлистов пока нет: их можно создать в Navidrome или импортировать из Spotify.");
     })
     .catch((error) => body.replaceChildren(empty(error.message)));
+  return () => cleanup();
 }

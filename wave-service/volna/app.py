@@ -323,6 +323,15 @@ class ProfileManager:
             log.info("Кэш волны прогрет за %.0f с: загружено %d записей", time.time() - started, fetched)
 
 
+class WebFiles(StaticFiles):
+    """Браузер сверяет файлы сайта при каждой загрузке: после выкатки новая версия видна сразу."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 class Space:
     """Всё своё у одного пользователя Navidrome: библиотека его глазами (лайки, прослушивания),
     история волны, профиль вкуса, волны и настройки. Общий у всех только кэш звучания."""
@@ -1245,7 +1254,7 @@ def create_app(settings: Settings | None = None, deps: Deps | None = None) -> Fa
 
     @app.get("/")
     def index() -> FileResponse:
-        return FileResponse(WEB_DIR / "index.html")
+        return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
-    app.mount("/", StaticFiles(directory=WEB_DIR), name="web")
+    app.mount("/", WebFiles(directory=WEB_DIR), name="web")
     return app
