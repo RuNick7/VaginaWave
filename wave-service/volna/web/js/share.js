@@ -104,7 +104,9 @@ function setupPlayer(tracks) {
   audio.addEventListener("ended", () => step(1));
   audio.addEventListener("error", () => toast("Трек не включился: возможно, владелец закрыл доступ"));
   audio.addEventListener("timeupdate", () => {
-    bar.style.width = audio.duration ? `${Math.min(100, (audio.currentTime / audio.duration) * 100)}%` : "0%";
+    // длину берём из трека: у перекодированного потока браузер её не знает
+    const total = tracks[current]?.duration;
+    bar.style.width = total ? `${Math.min(100, (audio.currentTime / total) * 100)}%` : "0%";
   });
   if ("mediaSession" in navigator) {
     navigator.mediaSession.setActionHandler("previoustrack", () => step(-1));
