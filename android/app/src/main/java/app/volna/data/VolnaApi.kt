@@ -246,6 +246,15 @@ class VolnaApi(val prefs: Prefs) {
     suspend fun createPlaylist(name: String, trackIds: List<String>): JSONObject =
         post("/api/playlists", JSONObject().put("name", name).put("track_ids", JSONArray(trackIds)))
 
+    // --- ссылки на плейлисты ---
+
+    suspend fun createShare(playlistId: String) = ShareLink.from(post("/api/playlist/${q(playlistId)}/share"))
+    suspend fun setShareGuests(playlistId: String, on: Boolean) =
+        ShareLink.from(put("/api/playlist/${q(playlistId)}/share", JSONObject().put("guests", on)))
+    suspend fun revokeShare(playlistId: String) { obj("DELETE", "/api/playlist/${q(playlistId)}/share") }
+    suspend fun shared(token: String) = SharedPlaylist.from(get("/api/share/${q(token)}"))
+    suspend fun saveShared(token: String): String = post("/api/share/${q(token)}/save").getString("id")
+
     companion object {
         private val JSON = "application/json".toMediaType()
 

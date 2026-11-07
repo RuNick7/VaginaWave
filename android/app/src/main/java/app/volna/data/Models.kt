@@ -140,6 +140,20 @@ data class Page(
     }
 }
 
+/** Своя ссылка на плейлист; guestsUntil — секунды, до которых можно слушать без аккаунта. */
+data class ShareLink(val url: String, val guests: Boolean, val guestsUntil: Double) {
+    companion object {
+        fun from(o: JSONObject) = ShareLink(o.str("url"), o.optBoolean("guests"), o.optDouble("guests_until", 0.0))
+    }
+}
+
+/** Плейлист по чужой ссылке. */
+data class SharedPlaylist(val page: Page, val owner: String, val own: Boolean, val playlistId: String, val savedId: String) {
+    companion object {
+        fun from(o: JSONObject) = SharedPlaylist(Page.from(o), o.str("owner"), o.optBoolean("own"), o.str("playlist_id"), o.str("saved_id"))
+    }
+}
+
 data class SearchResult(val tracks: List<Track>, val albums: List<Item>, val artists: List<Item>, val playlists: List<Item>) {
     companion object {
         fun from(o: JSONObject) = SearchResult(

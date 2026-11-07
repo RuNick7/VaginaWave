@@ -17,6 +17,7 @@ sealed interface Screen {
     data object Settings : Screen
     data class LibraryList(val kind: String) : Screen // liked | recent | albums | artists | playlists
     data class Entity(val type: String, val id: String) : Screen // album | artist | playlist
+    data class SharedPlaylist(val token: String) : Screen // плейлист по чужой ссылке
     data class Mix(val type: String, val id: String) : Screen // плейлист по треку или артисту
     data class SettingsPage(val key: String) : Screen
     data object Queue : Screen

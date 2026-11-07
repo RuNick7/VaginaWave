@@ -48,6 +48,7 @@ const ICONS = {
   mix: '<path d="M4 6h12M4 11h12M4 16h7"/><path d="M17 14v6M14 17h6"/>',
   sync: '<path d="M20 12a8 8 0 0 1-14 5.3M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v4h-4M6 21v-4h4"/>',
   "chevron-down": '<path d="M6 9l6 6 6-6"/>',
+  share: '<path d="M12 15V4M8 7.5l4-4 4 4"/><path d="M5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12"/>',
   expand: '<path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/>',
   check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
   queue: '<path d="M4 6h16M4 11h16M4 16h8"/><path d="M15 13.5v6l5-3z" fill="currentColor"/>',

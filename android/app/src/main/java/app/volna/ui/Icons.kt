@@ -76,6 +76,7 @@ object VIcons {
     val Lyrics = icon("lyrics", "M4 6h12M4 10h12M4 14h7", "M17 18.5V12l3-1", circle(15.5f, 18.5f, 1.5f))
     val Mix = icon("mix", "M4 6h12M4 11h12M4 16h7", "M17 14v6M14 17h6")
     val Sync = icon("sync", "M20 12a8 8 0 0 1-14 5.3M4 12a8 8 0 0 1 14-5.3", "M18 3v4h-4M6 21v-4h4")
+    val Share = icon("share", "M12 15V4M8 7.5l4-4 4 4", "M5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12")
     val Download = icon("download", "M12 4v11M7.5 10.5l4.5 4.5 4.5-4.5", "M5 19.5h14")
     val Downloaded = icon("downloaded", circle(12f, 12f, 9f) + "M11 6.5h2v5.5h2.8L12 16.2 8.2 12H11z", filled = setOf(0))
     val Offline = icon("offline", "M7 18h10a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.1 9.2 4.5 4.5 0 0 0 7 18z", "M4 4l16 16")

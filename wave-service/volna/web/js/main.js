@@ -13,7 +13,7 @@ import { renderLibrary } from "./views/library.js";
 import { renderLogin } from "./views/login.js";
 import { renderMix } from "./views/mix.js";
 import { renderQueue } from "./views/queue.js";
-import { renderEntity } from "./views/pages.js";
+import { renderEntity, renderShared } from "./views/pages.js";
 import { renderSearch } from "./views/search.js";
 import { renderSettings } from "./views/settings.js";
 
@@ -43,6 +43,8 @@ const ctx = {
   },
   openWaveSheet,
   openTrackActions,
+  showSheet,
+  closeSheet,
   applyInterface,
   openLyrics: () => lyricsScreen.open(),
   openOnboarding: () => onboarding.open(),
@@ -94,6 +96,8 @@ function route() {
     cleanup = renderImport(view, ctx);
   } else if (section === "add-artist") {
     cleanup = renderAddArtist(view, ctx);
+  } else if (section === "shared" && a) {
+    cleanup = renderShared(view, ctx, a);
   } else if (section === "mix" && a && b) {
     cleanup = renderMix(view, ctx, a, b); // плейлист по треку или артисту
   } else if (["album", "artist", "playlist"].includes(section) && a) {

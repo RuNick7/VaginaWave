@@ -78,6 +78,7 @@ import app.volna.ui.Screen
 import app.volna.ui.SearchScreen
 import app.volna.ui.SettingsPage
 import app.volna.ui.SettingsScreen
+import app.volna.ui.SharedPlaylistScreen
 import app.volna.ui.Sheet
 import app.volna.ui.TabBar
 import app.volna.ui.Topo
@@ -100,7 +101,7 @@ class MainActivity : ComponentActivity() {
         UiPrefs.background = app.prefs.background
         UiPrefs.react = app.prefs.react
         UiPrefs.lyrics = app.prefs.lyrics
-        takeShared(intent)
+        if (savedInstanceState == null) takeShared(intent) // после поворота экрана заново не открываем
         setContent {
             VolnaTheme {
                 val needLogin by app.api.needLogin.collectAsState()
@@ -130,12 +131,20 @@ class MainActivity : ComponentActivity() {
         Updates.resume() // вернулись из настроек, где разрешили установку, — ставим обновление
     }
 
-    /** «Поделиться → Volna» из Spotify или Apple Music: откроем импорт с этой ссылкой. */
+    /**
+     * Откуда пришла ссылка: «Открыть в приложении» со страницы плейлиста; «Поделиться → VaginaWave»
+     * с такой же ссылкой или ссылкой на плейлист Spotify и Apple Music (её откроет импорт).
+     */
     private fun takeShared(intent: Intent?) {
         if (intent?.action == Updates.ACTION) Updates.sheet = true // нажали на уведомление об обновлении
+        if (intent?.action == Intent.ACTION_VIEW && intent.data?.scheme == "vaginawave") {
+            Shared.playlist = intent.data?.lastPathSegment
+            return
+        }
         if (intent?.action != Intent.ACTION_SEND) return
-        val text = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
-        Shared.url = Regex("""https://\S+""").find(text)?.value
+        val url = Regex("""https://\S+""").find(intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty())?.value
+        val token = url?.let { Regex("""/s/([\w-]+)/?$""").find(it)?.groupValues?.get(1) }
+        if (token != null) Shared.playlist = token else Shared.url = url
     }
 
     override fun onStart() {
@@ -186,6 +195,10 @@ private fun VolnaRoot() {
         Shared.url?.let { nav.go(Screen.Import(it)) }
         Shared.url = null
     }
+    LaunchedEffect(Shared.playlist) {
+        Shared.playlist?.let { nav.go(Screen.SharedPlaylist(it)) }
+        Shared.playlist = null
+    }
 
     // «назад» на корне главной сворачивает приложение, а не закрывает: музыка продолжает играть
     BackHandler { if (!nav.back()) activity?.moveTaskToBack(true) }
@@ -204,6 +217,7 @@ private fun VolnaRoot() {
                     Screen.Settings -> SettingsScreen(nav)
                     is Screen.LibraryList -> LibraryListScreen(screen.kind, nav) { actionsFor = it }
                     is Screen.Entity -> EntityScreen(screen.type, screen.id, nav) { actionsFor = it }
+                    is Screen.SharedPlaylist -> SharedPlaylistScreen(screen.token, nav) { actionsFor = it }
                     is Screen.Mix -> MixScreen(screen.type, screen.id, nav) { actionsFor = it }
                     Screen.Queue -> QueueScreen(nav) { actionsFor = it }
                     is Screen.Import -> ImportScreen(screen.url, nav)
@@ -282,9 +296,10 @@ private fun OfflineBar(onOpen: () -> Unit) {
     }
 }
 
-/** Ссылка, которой поделились с Volna: её подхватит экран импорта. */
+/** Ссылка, которой поделились с Volna: url подхватит экран импорта, playlist — токен плейлиста по ссылке. */
 object Shared {
     var url by mutableStateOf<String?>(null)
+    var playlist by mutableStateOf<String?>(null)
 }
 
 @Composable

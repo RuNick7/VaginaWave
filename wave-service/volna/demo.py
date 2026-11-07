@@ -213,6 +213,10 @@ class DemoWorld:
     def set_rating(self, item_id: str, rating: int) -> None:
         self._item(item_id).rating = rating
 
+    def playlist(self, playlist_id: str) -> Playlist | None:
+        found = next((p for p in self.playlists if p.id == playlist_id), None)
+        return replace(found, track_ids=list(found.track_ids)) if found else None
+
     def create_playlist(self, name: str, track_ids: list[str]) -> Playlist:
         playlist = Playlist(f"demo-pl-{len(self.playlists) + 1}", name, list(track_ids), changed=time.time())
         self.playlists.append(playlist)

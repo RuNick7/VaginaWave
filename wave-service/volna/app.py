@@ -8,17 +8,18 @@
 
 from __future__ import annotations
 
+import html
 import logging
 import threading
 import time
 from collections import Counter, defaultdict
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
@@ -32,11 +33,12 @@ from .explo import Explo, source_of
 from .imports import Importer
 from .lidarr import Lidarr, LidarrError
 from .onboarding import ONBOARDED_KEY, ArtistMap, artist_choices
-from .library import LibraryIndex, track_json
-from .models import LibrarySnapshot
+from .library import LibraryIndex, track_json, tracks_label
+from .models import LibrarySnapshot, Media, Track
 from .profile import TasteProfile, build_context_profile, build_profile
 from .services import Deps, NoSimilarity, build_deps, user_deps
 from .settings import ACTIVITIES, CHARACTERS, MOODS, WaveSettings
+from .shares import GUEST_BITRATE, Share, Shares
 from .store import Event, Store
 
 log = logging.getLogger(__name__)
@@ -49,10 +51,12 @@ USERS_KEY = "users"  # кто входил: логин, пароль Navidrome �
 QUALITY = {"original": 0, "320": 320, "192": 192, "128": 128}
 DEFAULT_PREFS = {"quality": "original", "continue_after_end": True}
 OFFLINE_DAYS = 30  # прослушивания без сети старше этого считаем сегодняшними
+SHARE_FRESH = 60  # столько секунд считаем содержимое плейлиста по ссылке свежим
+SHARE_GONE = "Ссылка больше не работает"
 
 
 class Seed(BaseModel):
-    type: Literal["track", "album", "artist", "playlist"]
+    type: Literal["track", "album", "artist", "playlist", "share"]  # share: id — токен ссылки на плейлист
     id: str
 
 
@@ -123,6 +127,10 @@ class MixRequest(BaseModel):
 class PlaylistCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     track_ids: list[str] = Field(min_length=1, max_length=500)
+
+
+class ShareGuests(BaseModel):
+    guests: bool
 
 
 class FollowRequest(BaseModel):
@@ -323,13 +331,13 @@ class ProfileManager:
             log.info("Кэш волны прогрет за %.0f с: загружено %d записей", time.time() - started, fetched)
 
 
-class WebFiles(StaticFiles):
-    """Браузер сверяет файлы сайта при каждой загрузке: после выкатки новая версия видна сразу."""
+@dataclass
+class SharedList:
+    """Плейлист по ссылке: что в нём сейчас."""
 
-    async def get_response(self, path, scope):
-        response = await super().get_response(path, scope)
-        response.headers["Cache-Control"] = "no-cache"
-        return response
+    name: str
+    tracks: list[Track]
+    at: float
 
 
 class Space:
@@ -551,12 +559,15 @@ def create_app(settings: Settings | None = None, deps: Deps | None = None) -> Fa
     app.state.importer = importer
     app.state.lidarr = Lidarr(settings.lidarr_url, settings.lidarr_api_key) if settings.lidarr_url and settings.lidarr_api_key else None
     open_paths = {"/api/health", "/api/auth/login", "/api/auth/logout", "/api/auth/me"}
+    shares = app.state.shares = Shares(rt.config)
+    shared_lists: dict[str, SharedList] = {}
 
     @app.middleware("http")
     async def require_login(request: Request, call_next):
         path = request.url.path
         user = auth.user(request_token(request)) if auth.enabled else None
-        if auth.enabled and path.startswith("/api/") and path not in open_paths and not user:
+        public = path in open_paths or path.startswith("/api/share/")  # по ссылке пускаем и без входа
+        if auth.enabled and path.startswith("/api/") and not public and not user:
             return JSONResponse({"detail": "Нужно войти"}, status_code=401)
         request.state.user = user
         return await call_next(request)
@@ -566,6 +577,15 @@ def create_app(settings: Settings | None = None, deps: Deps | None = None) -> Fa
             return rt.space(getattr(request.state, "user", None))
         except LookupError as exc:  # токен есть, а учётки нет (например, данные сервиса стёрли)
             raise HTTPException(401, "Войдите снова") from exc
+
+    def media_response(media: Media) -> StreamingResponse:
+        return StreamingResponse(
+            iter(media.body),
+            status_code=media.status,
+            media_type=media.media_type,
+            headers=media.headers,
+            background=BackgroundTask(media.close),
+        )
 
     def require_admin(request: Request) -> None:
         if auth.enabled and not rt.is_admin(getattr(request.state, "user", None)):
@@ -653,6 +673,10 @@ def create_app(settings: Settings | None = None, deps: Deps | None = None) -> Fa
         if seed.type == "artist":
             songs = sorted(index.by_artist.get(seed.id, []), key=lambda t: -t.play_count)
             return [t.id for t in songs[:60]], (songs[0].artist if songs else "артист")
+        if seed.type == "share":
+            share = shares.get(seed.id)
+            shared = shared_list(share) if share else None
+            return ([t.id for t in shared.tracks], shared.name) if shared else ([], "плейлист")
         playlist = index.playlists.get(seed.id)
         return (list(playlist.track_ids), playlist.name) if playlist else ([], "плейлист")
 
@@ -914,6 +938,196 @@ def create_app(settings: Settings | None = None, deps: Deps | None = None) -> Fa
         if index is not None and playlist.id:
             index.add_playlist(playlist)
         return {"id": playlist.id, "name": playlist.name, "count": len(playlist.track_ids)}
+
+    # --- общие ссылки на плейлисты ---
+
+    def public_base(request: Request) -> str:
+        """Адрес сервиса снаружи: за Caddy это https://сайт/volna/."""
+        headers = request.headers
+        scheme = headers.get("x-forwarded-proto") or request.url.scheme
+        host = headers.get("x-forwarded-host") or headers.get("host") or request.url.netloc
+        return f"{scheme}://{host}{headers.get('x-forwarded-prefix', '').rstrip('/')}/"
+
+    def signed_in(request: Request) -> bool:
+        return not auth.enabled or bool(getattr(request.state, "user", None))
+
+    def share_or_404(token: str) -> Share:
+        share = shares.get(token)
+        if share is None:
+            raise HTTPException(404, SHARE_GONE)
+        return share
+
+    def owner_space(share: Share) -> Space:
+        try:
+            return rt.space(share.owner or None)
+        except LookupError as exc:
+            raise HTTPException(404, SHARE_GONE) from exc
+
+    def shared_list(share: Share) -> SharedList:
+        """Ссылка живая: берём плейлист из Navidrome, а не из снимка библиотеки. Минуту помним ответ,
+        чтобы каждая обложка и каждый поток не спрашивали Navidrome заново."""
+        cached = shared_lists.get(share.token)
+        if cached is not None and time.time() - cached.at < SHARE_FRESH:
+            return cached
+        owner = owner_space(share)
+        index = index_or_503(owner)
+        try:
+            playlist = owner.deps.library.playlist(share.playlist_id)
+        except Exception:  # noqa: BLE001 — Navidrome не ответил: покажем, что помним
+            log.warning("Плейлист %s по ссылке не обновился", share.playlist_id, exc_info=True)
+            playlist = index.playlists.get(share.playlist_id)
+        if playlist is None:
+            raise HTTPException(404, SHARE_GONE)
+        songs = {i: index.songs[i] for i in playlist.track_ids if i in index.songs}
+        missing = [i for i in playlist.track_ids if i not in songs]
+        if missing:  # добавлены после последней синхронизации
+            songs.update(owner.deps.library.songs(missing))
+        tracks = [songs[i] for i in playlist.track_ids if i in songs]
+        shared = shared_lists[share.token] = SharedList(playlist.name, tracks, time.time())
+        return shared
+
+    def share_json(share: Share, request: Request) -> dict:
+        return {
+            "shared": True,
+            "token": share.token,
+            "url": f"{public_base(request)}s/{share.token}",
+            "guests": share.guests,
+            "guests_until": share.guests_until if share.guests else None,
+        }
+
+    def own_share(sp: Space, playlist_id: str) -> Share:
+        if playlist_id not in index_or_503(sp).playlists:
+            raise HTTPException(404, "Плейлист не найден")
+        share = shares.of_playlist(playlist_id)
+        if share is None:
+            raise HTTPException(404, "Ссылки на этот плейлист нет")
+        return share
+
+    def shared_cover_url(token: str, t: Track) -> str:
+        return f"/api/share/{token}/cover/{t.cover_id or t.album_id or t.id}"
+
+    def guest_track(share: Share, t: Track) -> dict:
+        """Посторонним — только то, что нужно показать: без лайков, прослушиваний и id из библиотеки."""
+        return {
+            "id": t.id,
+            "title": t.title,
+            "artist": t.artist,
+            "album": t.album,
+            "duration": t.duration,
+            "cover": shared_cover_url(share.token, t),
+            "stream": f"/api/share/{share.token}/stream/{t.id}" if share.guests else "",
+        }
+
+    @app.post("/api/playlist/{playlist_id}/share")
+    def create_share(playlist_id: str, request: Request, sp: Space = Depends(current_space)) -> dict:
+        if playlist_id not in index_or_503(sp).playlists:
+            raise HTTPException(404, "Плейлист не найден")
+        return share_json(shares.create(getattr(request.state, "user", None) or "", playlist_id), request)
+
+    @app.put("/api/playlist/{playlist_id}/share")
+    def set_share_guests(playlist_id: str, body: ShareGuests, request: Request, sp: Space = Depends(current_space)) -> dict:
+        share = shares.set_guests(own_share(sp, playlist_id).token, body.guests)
+        if share is None:
+            raise HTTPException(404, "Ссылки на этот плейлист нет")
+        return share_json(share, request)
+
+    @app.delete("/api/playlist/{playlist_id}/share")
+    def revoke_share(playlist_id: str, sp: Space = Depends(current_space)) -> dict:
+        share = own_share(sp, playlist_id)
+        shares.revoke(share.token)
+        shared_lists.pop(share.token, None)
+        return {"shared": False}
+
+    @app.get("/api/share/{token}")
+    def shared_page(token: str, request: Request) -> dict:
+        """Плейлист по ссылке. С аккаунтом — ваши лайки и обычный поток, без него — короткая карточка."""
+        share = share_or_404(token)
+        shared = shared_list(share)
+        first = shared.tracks[0] if shared.tracks else None
+        page = {
+            "type": "playlist",
+            "token": token,
+            "url": f"{public_base(request)}s/{token}",
+            "title": shared.name,
+            "duration": sum(t.duration for t in shared.tracks),
+            "count": len(shared.tracks),
+            "guests": share.guests,
+            "signed_in": signed_in(request),
+        }
+        if not signed_in(request):
+            return {
+                **page,
+                "cover": shared_cover_url(token, first) if first else "",
+                "tracks": [guest_track(share, t) for t in shared.tracks],
+            }
+        user = getattr(request.state, "user", None) or ""
+        sp = current_space(request)
+        index = index_or_503(sp)
+        ids = [t.id for t in shared.tracks]
+        saved = next((p.id for p in index.snapshot.playlists if p.name == shared.name and p.track_ids == ids), None)
+        tracks = [index.songs.get(t.id) or replace(t, starred=False) for t in shared.tracks]
+        return {
+            **page,
+            "id": share.playlist_id,
+            "cover": track_json(first)["cover"] if first else "",
+            "tracks": [track_json(t) for t in tracks],
+            "own": user.casefold() == share.owner.casefold(),
+            "owner": share.owner,
+            "playlist_id": share.playlist_id,
+            "saved_id": saved,
+        }
+
+    @app.post("/api/share/{token}/save")
+    def save_shared(token: str, request: Request) -> dict:
+        """«Сохранить себе»: своя копия в Navidrome, от оригинала больше не зависит."""
+        if not signed_in(request):
+            raise HTTPException(401, "Нужно войти")
+        sp = current_space(request)
+        shared = shared_list(share_or_404(token))
+        try:
+            playlist = sp.create_playlist(shared.name, [t.id for t in shared.tracks])
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"Navidrome не создал плейлист: {exc}") from exc
+        return {"id": playlist.id, "name": playlist.name, "count": len(playlist.track_ids)}
+
+    @app.get("/api/share/{token}/cover/{cover_id}")
+    def shared_cover(token: str, cover_id: str):
+        share = share_or_404(token)
+        if cover_id not in {t.cover_id or t.album_id or t.id for t in shared_list(share).tracks}:
+            raise HTTPException(404, "Обложка не найдена")
+        return media_response(owner_space(share).deps.library.cover(cover_id))
+
+    @app.get("/api/share/{token}/stream/{track_id}")
+    def shared_stream(token: str, track_id: str, request: Request):
+        """Только если владелец разрешил и только треки этого плейлиста."""
+        share = share_or_404(token)
+        if not share.guests:
+            raise HTTPException(403, "Владелец не разрешил слушать без аккаунта")
+        if track_id not in {t.id for t in shared_list(share).tracks}:
+            raise HTTPException(404, "В этом плейлисте такого трека нет")
+        library = owner_space(share).deps.library
+        return media_response(library.stream(track_id, request.headers.get("range"), max_bitrate=GUEST_BITRATE))
+
+    @app.get("/s/{token}", response_model=None)
+    def share_landing(token: str, request: Request) -> HTMLResponse | RedirectResponse:
+        """Куда ведёт ссылка: с аккаунтом — в обычный сайт, посторонним и превью в мессенджерах — лёгкая страница."""
+        share = shares.get(token)
+        if share is not None and signed_in(request):
+            return RedirectResponse(f"../#/shared/{token}", status_code=302)
+        title, description, image, status = "VaginaWave", SHARE_GONE, "", 404
+        if share is not None:
+            try:
+                shared = shared_list(share)
+                title, status = shared.name, 200
+                description = f"Плейлист · {tracks_label(len(shared.tracks))}"
+                if shared.tracks:
+                    image = public_base(request) + shared_cover_url(token, shared.tracks[0]).lstrip("/")
+            except HTTPException as exc:
+                status = exc.status_code
+        page = (WEB_DIR / "share.html").read_text(encoding="utf-8")
+        for key, value in {"title": title, "description": description, "image": image}.items():
+            page = page.replace(f"{{{{{key}}}}}", html.escape(value))
+        return HTMLResponse(page, status_code=status, headers={"X-Robots-Tag": "noindex"})
 
     # --- первый вход: любимые артисты и предпочтения ---
 
@@ -1238,23 +1452,15 @@ def create_app(settings: Settings | None = None, deps: Deps | None = None) -> Fa
     def stream(track_id: str, request: Request, quality: str = "", sp: Space = Depends(current_space)):
         """Поток трека; quality — для загрузок, у которых в приложении своё качество."""
         bitrate = QUALITY.get(quality if quality in QUALITY else sp.preferences()["quality"], 0)
-        media = sp.deps.library.stream(track_id, request.headers.get("range"), max_bitrate=bitrate)
-        return StreamingResponse(
-            iter(media.body),
-            status_code=media.status,
-            media_type=media.media_type,
-            headers=media.headers,
-            background=BackgroundTask(media.close),
-        )
+        return media_response(sp.deps.library.stream(track_id, request.headers.get("range"), max_bitrate=bitrate))
 
     @app.get("/api/cover/{cover_id}")
     def cover(cover_id: str, sp: Space = Depends(current_space)):
-        media = sp.deps.library.cover(cover_id)
-        return StreamingResponse(iter(media.body), status_code=media.status, media_type=media.media_type, headers=media.headers)
+        return media_response(sp.deps.library.cover(cover_id))
 
     @app.get("/")
     def index() -> FileResponse:
-        return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+        return FileResponse(WEB_DIR / "index.html")
 
-    app.mount("/", WebFiles(directory=WEB_DIR), name="web")
+    app.mount("/", StaticFiles(directory=WEB_DIR), name="web")
     return app

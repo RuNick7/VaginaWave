@@ -35,6 +35,13 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
             </intent-filter>
+            <!-- «Открыть в приложении» со страницы плейлиста по ссылке -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="vaginawave" android:host="share" />
+            </intent-filter>
         </activity>
 
         <!-- Фоновое воспроизведение: уведомление, экран блокировки, наушники, Android Auto позже -->

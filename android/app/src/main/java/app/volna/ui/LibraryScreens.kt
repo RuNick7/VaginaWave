@@ -365,6 +365,8 @@ fun EntityScreen(type: String, id: String, nav: Navigator, onMore: (Track) -> Un
     var allTracks by rememberSaveable(type, id) { mutableStateOf(false) }
     var allAlbums by rememberSaveable(type, id) { mutableStateOf(false) }
     var allLiked by remember(type, id) { mutableStateOf(false) } // «Лайкнуть все» уже нажато
+    var sharing by remember(type, id) { mutableStateOf(false) }
+    val online by Offline.online.collectAsState()
     val scope = rememberCoroutineScope()
     LazyColumn(Modifier.fillMaxSize().statusBarsPadding(), contentPadding = PaddingValues(horizontal = 16.dp)) {
         item { PageHeader("") { nav.back() } }
@@ -393,6 +395,7 @@ fun EntityScreen(type: String, id: String, nav: Navigator, onMore: (Track) -> Un
                     } else {
                         PlayActions(tracks, context) {
                             Pill("Волна", VIcons.Wave) { VolnaPlayer.startWave(type, id); nav.go(Screen.Home) }
+                            if (type == "playlist" && online) Pill("Поделиться", VIcons.Share) { sharing = true }
                             if (tracks.any { !it.liked } && !allLiked) {
                                 Pill("Лайкнуть все", VIcons.Heart) {
                                     allLiked = true // сердечки сразу, Navidrome — следом
@@ -441,6 +444,9 @@ fun EntityScreen(type: String, id: String, nav: Navigator, onMore: (Track) -> Un
             }
         }
         item { Spacer(Modifier.height(24.dp)) }
+    }
+    if (sharing) {
+        ShareSheet((page.value as? Load.Done)?.value?.item?.title.orEmpty(), id) { sharing = false }
     }
 }
 
@@ -563,7 +569,7 @@ private fun LikePill(liked: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun EntityHeader(p: Page, type: String) {
+fun EntityHeader(p: Page, type: String) {
     val kind = mapOf("album" to "Альбом", "artist" to "Артист", "playlist" to "Плейлист")[type].orEmpty()
     val meta = when (type) {
         "artist" -> listOfNotNull(p.item.subtitle.ifEmpty { null }, p.plays.takeIf { it > 0 }?.let { "$it ${plural(it, "прослушивание", "прослушивания", "прослушиваний")}" })

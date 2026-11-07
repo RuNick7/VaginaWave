@@ -1069,3 +1069,17 @@ button.track__main { text-align: left; }
   overflow: hidden;
 }
 .bubble.is-on .bubble__name { color: var(--fg); font-weight: 600; }
+
+/* --- поделиться плейлистом --- */
+
+.share-sheet { display: flex; flex-direction: column; gap: 12px; padding-top: 4px; }
+.share-sheet .hint { margin: 0; }
+.share-sheet .field__input { width: 100%; }
+.share-sheet .actions { margin: 0; }
+.share-sheet .row { border-top: 1px solid var(--faint); padding-top: 12px; }
+.share-sheet__revoke { align-self: flex-start; }
+
+.shell--share .view { padding-top: 24px; }
+.shell--share .mini__open { cursor: default; }
+.shell--share a.btn { text-decoration: none; }
+.share-hint { margin: 0 0 16px; }

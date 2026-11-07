@@ -22,7 +22,7 @@ export function renderQueue(root, { player }) {
       ),
     );
     const list = h("div", { class: "queue-list" }, ...rows);
-    body.replaceChildren(
+    const nodes = [
       group("Сейчас играет", trackRow(player.track, { player, queueable: false, onPlay: () => player.toggle() })),
       h("div", { class: "group" },
         h("div", { class: "queue-head" },
@@ -35,7 +35,8 @@ export function renderQueue(root, { player }) {
         ? group(player.source ? `Дальше: ${player.source}` : "Дальше",
           ...player.upNext.slice(0, 20).map((track) => trackRow(track, { player, onPlay: () => {} })))
         : null,
-    );
+    ];
+    body.replaceChildren(...nodes.filter(Boolean));
   }
 
   /** Ручка: потянуть вверх или вниз — трек меняется местами с соседями. */

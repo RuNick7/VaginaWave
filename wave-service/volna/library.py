@@ -140,7 +140,7 @@ class LibraryIndex:
     def playlist_json(self, p: Playlist) -> dict:
         first = next((self.songs[i] for i in p.track_ids if i in self.songs), None)
         return {
-            "type": "playlist", "id": p.id, "title": p.name, "subtitle": _tracks_label(len(p.track_ids)),
+            "type": "playlist", "id": p.id, "title": p.name, "subtitle": tracks_label(len(p.track_ids)),
             "cover": cover_url(first.cover_id or first.album_id) if first else "", "count": len(p.track_ids),
         }
 
@@ -358,7 +358,7 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
     return many
 
 
-def _tracks_label(n: int) -> str:
+def tracks_label(n: int) -> str:
     return f"{n} {_plural(n, 'трек', 'трека', 'треков')}"
 
 

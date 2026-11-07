@@ -18,11 +18,14 @@ from .store import Store
 log = logging.getLogger(__name__)
 
 DAY = 86400.0
+NOT_FOUND = 70  # код ошибки Subsonic: таких данных нет
 PASS_HEADERS = ("content-type", "content-length", "content-range", "accept-ranges")
 
 
 class SubsonicError(RuntimeError):
-    pass
+    def __init__(self, message: str, code: int = 0):
+        super().__init__(message)
+        self.code = code
 
 
 def _iso_ts(value: str | None) -> float | None:
@@ -96,7 +99,8 @@ class Navidrome:
         r.raise_for_status()
         body = r.json().get("subsonic-response", {})
         if body.get("status") != "ok":
-            raise SubsonicError(body.get("error", {}).get("message", f"{endpoint} failed"))
+            error = body.get("error", {})
+            raise SubsonicError(error.get("message", f"{endpoint} failed"), error.get("code", 0))
         return body
 
     def ping(self) -> bool:
@@ -172,18 +176,27 @@ class Navidrome:
 
         def load(p: dict) -> Playlist | None:
             try:
-                body = self.call("getPlaylist", id=p["id"]).get("playlist", {})
+                return self.playlist(str(p["id"]))
             except (httpx.HTTPError, SubsonicError):
                 log.warning("Не удалось загрузить плейлист %s", p.get("name"), exc_info=True)
                 return None
-            return Playlist(
-                id=str(p["id"]),
-                name=p.get("name", ""),
-                track_ids=[str(s["id"]) for s in body.get("entry", [])],
-                changed=_iso_ts(p.get("changed")),
-            )
 
         return [p for p in self.pool.map(load, own) if p is not None]
+
+    def playlist(self, playlist_id: str) -> Playlist | None:
+        """Плейлист как он есть сейчас; None — такого больше нет."""
+        try:
+            body = self.call("getPlaylist", id=playlist_id).get("playlist", {})
+        except SubsonicError as exc:
+            if exc.code == NOT_FOUND:
+                return None
+            raise
+        return Playlist(
+            id=str(body.get("id", playlist_id)),
+            name=body.get("name", ""),
+            track_ids=[str(s["id"]) for s in body.get("entry", [])],
+            changed=_iso_ts(body.get("changed")),
+        )
 
     def starred_songs(self) -> list[Track]:
         songs = self.call("getStarred2").get("starred2", {}).get("song", [])
@@ -255,15 +268,18 @@ class Navidrome:
         self.call("setRating", id=track_id, rating=rating)
 
     def create_playlist(self, name: str, track_ids: list[str]) -> Playlist:
-        body = self.call("createPlaylist", name=name, songId=list(track_ids))
+        ids = list(track_ids)
+        body = self.call("createPlaylist", name=name, songId=ids[: self.PAGE])
         created = body.get("playlist") or {}
         if not created.get("id"):
             # старые сервера не возвращают созданный плейлист: ищем свежий с этим именем
             listed = self.call("getPlaylists").get("playlists", {}).get("playlist", [])
             same = [p for p in listed if p.get("name") == name]
             created = max(same, key=lambda p: p.get("created", ""), default={"id": "", "name": name})
+        for i in range(self.PAGE, len(ids), self.PAGE):  # длинный плейлист не влезает в один запрос
+            self.call("updatePlaylist", playlistId=created["id"], songIdToAdd=ids[i : i + self.PAGE])
         return Playlist(id=str(created.get("id", "")), name=created.get("name", name),
-                        track_ids=list(track_ids), changed=time.time())
+                        track_ids=ids, changed=time.time())
 
     def lyrics(self, track_id: str, artist: str = "", title: str = "") -> dict:
         """Текст песни: по строкам с временем, если он синхронизирован, иначе просто строки.
