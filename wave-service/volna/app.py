@@ -28,13 +28,14 @@ from . import __version__
 from .auth import COOKIE, TOKEN_TTL, Auth, LoginError, client_ip, request_token
 from .config import ServerConfig, Settings, normalize_url
 from .devices import Devices
-from .engine import Steer, WaveSession, build_mix, classify, register_playback
+from .engine import COMFORT_DAYS, Steer, WaveSession, build_mix, classify, redundant, register_playback, warm_start
 from .explo import Explo, source_of
 from .imports import Importer
 from .lidarr import Lidarr, LidarrError
 from .onboarding import ONBOARDED_KEY, ArtistMap, artist_choices
 from .library import LibraryIndex, track_json, tracks_label
 from .models import LibrarySnapshot, Media, Track
+from .popularity import TopTracks
 from .profile import TasteProfile, build_context_profile, build_profile
 from .services import Deps, NoSimilarity, build_deps, user_deps
 from .settings import ACTIVITIES, CHARACTERS, MOODS, WaveSettings
@@ -558,6 +559,7 @@ def create_app(settings: Settings | None = None, deps: Deps | None = None) -> Fa
     )
     app.state.importer = importer
     app.state.lidarr = Lidarr(settings.lidarr_url, settings.lidarr_api_key) if settings.lidarr_url and settings.lidarr_api_key else None
+    app.state.top_tracks = TopTracks(settings.lastfm_api_key) if settings.lastfm_api_key else None
     open_paths = {"/api/health", "/api/auth/login", "/api/auth/logout", "/api/auth/me"}
     shares = app.state.shares = Shares(rt.config)
     shared_lists: dict[str, SharedList] = {}
@@ -834,7 +836,10 @@ def create_app(settings: Settings | None = None, deps: Deps | None = None) -> Fa
         taste = taste_or_503(sp)
         wave_settings = sp.settings().merged(body.settings or {})
         if body.seed is None:
-            session = WaveSession(sp.deps, taste, wave_settings, device=body.device)
+            # начинаем с того, что недавно дослушивали, в обход направления, где прошлую волну бросили
+            now = time.time()
+            warm = warm_start(sp.deps.store.events(since=now - COMFORT_DAYS * 86400), now)
+            session = WaveSession(sp.deps, taste, wave_settings, device=body.device, warm=warm)
         else:
             # «Моя волна по…»: та же личная волна, только смещённая к треку, альбому, артисту или плейлисту
             steer, exclude = make_steer(sp, body.seed, taste)
@@ -1201,7 +1206,9 @@ def create_app(settings: Settings | None = None, deps: Deps | None = None) -> Fa
         if artist is None:
             raise HTTPException(404, "Артист не найден")
         known = lidarr_call(lidarr.find, artist.name)
-        mbid = known["foreignArtistId"] if known else lidarr_call(lidarr.resolve, artist.name)
+        # альбомы артиста в библиотеке помогают отличить его от тёзок и узнать под другим написанием
+        albums = [a.name for a in index_or_503(sp).albums_by_artist.get(artist.id, [])]
+        mbid = known["foreignArtistId"] if known else lidarr_call(lidarr.resolve, artist.name, albums)
         followed = lidarr_call(lidarr.follow, mbid)
         return {"available": True, **lidarr_call(lidarr.status, followed)}
 
@@ -1247,15 +1254,18 @@ def create_app(settings: Settings | None = None, deps: Deps | None = None) -> Fa
         index = sp.profiles.loaded_index()
         track = (index.songs.get(body.track_id) if index else None) or sp.deps.library.songs([body.track_id]).get(body.track_id)
         kind = classify(body.outcome, body.position, body.duration or (track.duration if track else 0.0))
+        now = time.time()
+        ts = min(now, max(now - OFFLINE_DAYS * 86400, body.at)) if body.at else now
+        # листание истории «назад-вперёд» и повторно присланное событие — не оценка трека
+        if redundant(sp.deps.store.events(since=ts - 3 * 3600), body.track_id, kind, body.position, ts):
+            return {"kind": "ignored"}
         try:
             taste = None if isinstance(sp.deps.sim, NoSimilarity) else sp.profiles.get()
         except Exception:  # noqa: BLE001 — профиля нет, но событие и скроббл всё равно сохраняем
             taste = None
-        now = time.time()
         register_playback(
             sp.deps, taste, body.track_id, kind, track=track, position=body.position, duration=body.duration,
-            context_type=body.context_type, context_id=body.context_id, device=body.device,
-            ts=min(now, max(now - OFFLINE_DAYS * 86400, body.at)) if body.at else now,
+            context_type=body.context_type, context_id=body.context_id, device=body.device, ts=ts,
         )
         sp.profiles.note_event()
         return {"kind": kind}
@@ -1328,7 +1338,8 @@ def create_app(settings: Settings | None = None, deps: Deps | None = None) -> Fa
             raise HTTPException(502, f"Navidrome не принял отметки: {exc}") from exc
         now = time.time()
         for track_id in ids:
-            sp.store.add_event(Event(ts=now, track_id=track_id, kind="like" if body.liked else "unlike", entity="track"))
+            sp.store.add_event(Event(ts=now, track_id=track_id, kind="like" if body.liked else "unlike", entity="track",
+                                     source="bulk"))  # пачкой: во вкусе весит меньше отдельного лайка
             mark_starred(sp, track_id, "track", body.liked)
         sp.profiles.note_event()
         return {"ok": True, "count": len(ids), "liked": body.liked}
@@ -1381,9 +1392,29 @@ def create_app(settings: Settings | None = None, deps: Deps | None = None) -> Fa
             raise HTTPException(404, "Альбом не найден")
         return page
 
+    def world_ranking(sp: Space, index: LibraryIndex, artist_id: str) -> dict[str, int]:
+        """Место треков артиста в мировом топе: Last.fm, а без его ключа — getTopSongs Navidrome."""
+        artist = index.artists.get(artist_id)
+        tracks = index.by_artist.get(artist_id, [])
+        if artist is None or not tracks:
+            return {}
+        if app.state.top_tracks is not None:
+            return app.state.top_tracks.ranking(artist.name, tracks)
+        top_songs = getattr(sp.deps.library, "top_songs", None)
+        if top_songs is None:
+            return {}
+        from .navidrome import SubsonicError
+
+        try:
+            own = {t.id for t in tracks}
+            return {i: n for n, i in enumerate(x for x in top_songs(artist.name) if x in own)}
+        except (httpx.HTTPError, SubsonicError):
+            return {}
+
     @app.get("/api/artist/{artist_id}")
     def artist_page(artist_id: str, sp: Space = Depends(current_space)) -> dict:
-        page = index_or_503(sp).artist_page(artist_id)
+        index = index_or_503(sp)
+        page = index.artist_page(artist_id, world_ranking(sp, index, artist_id))
         if page is None:
             raise HTTPException(404, "Артист не найден")
         return page

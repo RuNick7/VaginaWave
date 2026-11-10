@@ -104,17 +104,18 @@ def test_library_works_without_audiomuse(tmp_path):
     response = client.post("/api/wave/start", json={})
     assert response.status_code == 503 and "AudioMuse" in response.json()["detail"]
     track = client.get("/api/library/recent").json()["tracks"][0]
+    now = time.time()
     kind = client.post("/api/events", json={"track_id": track["id"], "outcome": "complete",
-                                            "duration": track["duration"], "context_type": "album"}).json()["kind"]
+                                            "duration": track["duration"], "context_type": "album", "at": now - 1800}).json()["kind"]
     assert kind == "complete" and store.count_events() == 1
 
-    # прослушивание без сети приходит позже, со временем, когда слушали; слишком старое — сегодняшнее
-    now = time.time()
-    for at in (now - 3600, now - 90 * 86400, now + 3600):
+    # прослушивание без сети приходит позже, со временем, когда слушали; слишком старое — 30 дней назад,
+    # из будущего — сейчас; повтор того же события — не новое прослушивание
+    for at in (now - 3600, now - 90 * 86400, now + 3600, now + 3600):
         client.post("/api/events", json={"track_id": track["id"], "outcome": "complete", "duration": track["duration"], "at": at})
-    oldest, hour_ago, *today = sorted(e.ts for e in store.events())
-    assert abs(oldest - (now - 30 * 86400)) < 60 and abs(hour_ago - (now - 3600)) < 1
-    assert len(today) == 2 and all(now - 60 < t <= time.time() for t in today)
+    oldest, hour_ago, half_hour, *today = sorted(e.ts for e in store.events())
+    assert abs(oldest - (now - 30 * 86400)) < 60 and abs(hour_ago - (now - 3600)) < 1 and abs(half_hour - (now - 1800)) < 1
+    assert len(today) == 1 and now - 60 < today[0] <= time.time()
 
 
 def test_normalize_url():

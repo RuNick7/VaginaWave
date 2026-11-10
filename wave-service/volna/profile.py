@@ -41,6 +41,44 @@ EVENT_WEIGHTS = {"complete": 1.0, "like": 3.0, "late_skip": -0.4, "early_skip": 
 POSITIVE = ("complete", "like")
 NEGATIVE = ("early_skip", "dislike")
 
+# Пропуск в первые секунды — человек листает волну в поисках настроения, песню он ещё не слышал.
+# Это не «не нравится»: трек слегка отодвигается, артист и альбом не наказываются.
+ZAP_SECONDS = 5.0
+ZAP_WEIGHT = -0.3
+ZAP_SKIPS = 0.3  # вклад в «пропускал недавно» (обычный ранний пропуск — 1)
+
+# «Лайкнуть все» на большом плейлисте — не 500 отдельных признаний. Лайк из такой пачки весит
+# как одно дослушивание, пока трек не дослушают или не лайкнут отдельно.
+BULK_LIKES = 15  # столько лайков за минуту — это пачка
+BULK_LIKE_WEIGHT = 0.5
+
+
+def is_zap(kind: str, position: float | None) -> bool:
+    return kind == "early_skip" and (position or 0.0) < ZAP_SECONDS
+
+
+def bulk_likes(events: list[Event]) -> set[str]:
+    """Треки, лайкнутые пачкой и с тех пор не подтверждённые: ни отдельного лайка, ни дослушивания."""
+    likes = sorted((e for e in events if e.kind == "like" and e.entity == "track"), key=lambda e: e.ts)
+    times = [e.ts for e in likes]
+    bulk: dict[str, float] = {}
+    lo = hi = 0
+    for e in likes:
+        while times[lo] < e.ts - 60:
+            lo += 1
+        while hi < len(times) and times[hi] <= e.ts + 60:
+            hi += 1
+        if hi - lo >= BULK_LIKES:
+            bulk[e.track_id] = e.ts
+        else:
+            bulk.pop(e.track_id, None)  # лайкнут отдельно — это настоящий лайк
+    for e in events:
+        if e.kind == "complete" and e.track_id in bulk and e.ts > bulk[e.track_id]:
+            del bulk[e.track_id]
+        elif e.kind == "unlike" and e.track_id in bulk and e.ts > bulk[e.track_id]:
+            del bulk[e.track_id]  # лайка больше нет: вес и так уйдёт вместе со звездой
+    return set(bulk)
+
 
 def decay(age_seconds: float, half_life_days: float) -> float:
     return 0.5 ** (max(age_seconds, 0.0) / (half_life_days * DAY))
@@ -106,6 +144,7 @@ class TasteProfile:
     cold_start: bool = False
     built_at: float = 0.0
     hidden: set[str] = field(default_factory=set)  # лишние копии песен: в волну не ставим
+    bulk_liked: set[str] = field(default_factory=set)  # лайкнуты пачкой и не подтверждены: не «любимое»
 
     def __post_init__(self) -> None:
         self.centers = np.stack([c.center for c in self.clusters])
@@ -129,11 +168,18 @@ class TasteProfile:
             or t.artist.lower() in self.banned_artists
         )
 
-    def note(self, track: Track | None, track_id: str, kind: str, weight: float = 1.0) -> None:
+    def note(self, track: Track | None, track_id: str, kind: str, weight: float = 1.0, position: float | None = None) -> None:
         """Мгновенно учитывает событие, не дожидаясь пересборки профиля."""
         artist = track.artist.lower() if track else ""
         album = track.album_id if track else ""
         now = time.time()
+        if position is not None and is_zap(kind, position):  # пролистал, не послушав
+            self.track_skips[track_id] = self.track_skips.get(track_id, 0.0) + ZAP_SKIPS
+            self.track_weight[track_id] = self.track_weight.get(track_id, 0.0) + ZAP_WEIGHT
+            self.known.add(track_id)
+            return
+        if kind == "complete":
+            self.bulk_liked.discard(track_id)
         if kind in POSITIVE:
             for key, table in ((artist, self.artist_stats), (album, self.album_stats)):
                 if key:
@@ -200,10 +246,13 @@ def collect_signals(snapshot: LibrarySnapshot, events: list[Event], now: float) 
     by_album: dict[str, list[Track]] = defaultdict(list)
     by_artist: dict[str, list[Track]] = defaultdict(list)
     artist_plays: dict[str, int] = defaultdict(int)
+    starred: set[str] = set()
+    bulk = bulk_likes(events)
     for t in snapshot.songs:
         by_album[t.album_id].append(t)
         by_artist[t.artist_id].append(t)
         if t.starred:
+            starred.add(t.id)
             weight[t.id] += SONG_STARRED
             known.add(t.id)
         if t.rating:
@@ -248,12 +297,23 @@ def collect_signals(snapshot: LibrarySnapshot, events: list[Event], now: float) 
         for tid in playlist.track_ids[:200]:
             weight[tid] += PLAYLIST_TRACK * freshness
 
+    # звезда из пачки «Лайкнуть все» весит как лайк из пачки, а не как выбранная вручную
+    for tid in bulk & starred:
+        weight[tid] -= SONG_STARRED - BULK_LIKE_WEIGHT
+
     for e in events:
         d = decay(now - e.ts, 60)
         if e.entity != "track":
             continue  # лайки альбомов и артистов уже пришли из Navidrome как звёзды
-        weight[e.track_id] += EVENT_WEIGHTS.get(e.kind, 0.0) * d
         known.add(e.track_id)
+        if is_zap(e.kind, e.position):  # пролистал в первые секунды: не оценка песни
+            weight[e.track_id] += ZAP_WEIGHT * d
+            track_skips[e.track_id] += decay(now - e.ts, 30) * ZAP_SKIPS
+            continue
+        if e.kind == "like" and e.track_id in bulk:
+            weight[e.track_id] += BULK_LIKE_WEIGHT * d
+            continue
+        weight[e.track_id] += EVENT_WEIGHTS.get(e.kind, 0.0) * d
         if e.kind in ("complete", "late_skip"):
             last_played[e.track_id] = max(last_played.get(e.track_id, 0.0), e.ts)
         for key, table in ((e.artist.lower(), artist_stats), (e.album_id, album_stats)):
@@ -273,7 +333,7 @@ def collect_signals(snapshot: LibrarySnapshot, events: list[Event], now: float) 
     return dict(
         weight=weight, known=known, last_played=last_played, disliked=disliked,
         artist_stats=dict(artist_stats), album_stats=dict(album_stats),
-        banned_artists=banned_artists, banned_albums=banned_albums, track_skips=dict(track_skips),
+        banned_artists=banned_artists, banned_albums=banned_albums, track_skips=dict(track_skips), bulk_liked=bulk,
     )
 
 
@@ -330,6 +390,7 @@ def build_profile(
         banned_albums=s["banned_albums"],
         track_info=info,
         hidden=set(duplicate_copies(snapshot.songs)),
+        bulk_liked=s["bulk_liked"],
         signals={
             "tracks": len(snapshot.songs),
             "played_tracks": sum(1 for t in snapshot.songs if t.play_count > 0),
@@ -350,7 +411,11 @@ def build_profile(
         c = profile.clusters[profile.nearest(space.project(raw[e.track_id]))]
         d = decay(now - e.ts, 45)
         b = time_bucket(e.ts)
-        if e.kind in POSITIVE:
+        if is_zap(e.kind, e.position):
+            c.failures[b] += 0.2 * d  # листал: кластер «не сейчас», но не «не нравится»
+        elif e.kind == "like" and e.track_id in profile.bulk_liked:
+            continue
+        elif e.kind in POSITIVE:
             c.successes[b] += d
         elif e.kind == "late_skip":
             c.failures[b] += 0.4 * d
@@ -385,6 +450,7 @@ def build_context_profile(deps: Deps, track_ids: list[str], taste: TasteProfile)
         banned_albums=taste.banned_albums,
         track_info=info,
         hidden=taste.hidden,
+        bulk_liked=taste.bulk_liked,
         signals=taste.signals,
         built_at=time.time(),
     )

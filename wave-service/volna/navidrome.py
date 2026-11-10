@@ -115,6 +115,11 @@ class Navidrome:
         """Администратор Navidrome может менять настройки сервера и в Volna."""
         return bool(self.call("getUser", username=self.user).get("user", {}).get("adminRole"))
 
+    def top_songs(self, artist: str, count: int = 50) -> list[str]:
+        """Хиты артиста из внешних сервисов Navidrome (Last.fm и др.), найденные в библиотеке: id по порядку."""
+        songs = self.call("getTopSongs", artist=artist, count=count).get("topSongs", {}).get("song", [])
+        return [s["id"] for s in songs if s.get("id")]
+
     def server_info(self) -> dict:
         body = self.call("ping")
         return {"type": body.get("type", "subsonic"), "version": body.get("serverVersion") or body.get("version", "")}

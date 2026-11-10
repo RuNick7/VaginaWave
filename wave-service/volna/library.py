@@ -230,7 +230,9 @@ class LibraryIndex:
         duration = sum(t.duration for t in tracks)
         return {**self.album_json(album), "duration": duration, "tracks": [track_json(t) for t in tracks]}
 
-    def artist_page(self, artist_id: str) -> dict | None:
+    def artist_page(self, artist_id: str, ranking: dict[str, int] | None = None) -> dict | None:
+        """ranking — место трека в мировом топе артиста (popularity.py): хиты первыми, остальное по
+        прослушиваниям здесь. Без него — только по прослушиваниям здесь."""
         artist = self.artists.get(artist_id)
         tracks = self.by_artist.get(artist_id, [])
         own = {t.id for t in tracks}
@@ -239,7 +241,10 @@ class LibraryIndex:
             return None
         if artist is None:
             artist = Entity(artist_id, tracks[0].artist)
-        popular = sorted(tracks, key=lambda t: (-t.play_count, -(t.last_played or 0), normalize(t.title)))
+        ranking = ranking or {}
+        unranked = 10**9  # места в топе идут до 500: всё без места — после них
+        popular = sorted(tracks, key=lambda t: (
+            ranking.get(t.id, unranked), -t.play_count, -(t.last_played or 0), normalize(t.title)))
         albums = sorted(self.albums_by_artist.get(artist_id, []), key=lambda a: -a.year)
         return {
             **self.artist_json(artist),
