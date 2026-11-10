@@ -4,8 +4,14 @@
 * Якоря не двигаются. Кандидаты всегда ищутся от ядра кластеров вкуса (или плейлиста,
   альбома, артиста), а не от последней песни, поэтому поток не «уплывает».
 * Пропуск — главный сигнал. Ранний пропуск ослабляет кластер на всю сессию,
-  отталкивает вектор сессии и выкидывает из очереди похожие треки, а два пропуска
-  подряд переключают волну на другой кластер.
+  отталкивает вектор сессии и выкидывает из очереди похожие треки.
+* Пролистывание (пропуск в первые секунды) — «не это сейчас», а не «не нравится»: в сессии
+  направление отодвигается чуть мягче, а в долгий вкус оно почти не идёт.
+* После серии пропусков волна не прыгает в случайный кластер (такой трек пропускали в
+  58–81% случаев), а возвращается к тому, что в этой сессии дослушали, а если ничего —
+  к дослушанному недавно, сначала в это же время суток. С этого же начинается каждая волна.
+* Брошенная волна — тоже сигнал: если прошлую сессию закрыли после серии пропусков,
+  новая обходит то направление.
 * Какой кластер играть дальше, решает Thompson sampling по статистике
   «дослушал / пропустил» с учётом времени суток и будней/выходных.
 * Настройки (характер, настроение, занятие, температура, разнообразие) превращаются
@@ -20,12 +26,12 @@ import threading
 import time
 from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
 from .models import Candidate, Track
-from .profile import BUCKETS, DAY, TasteProfile, time_bucket
+from .profile import BUCKETS, DAY, ZAP_SECONDS, TasteProfile, is_zap, time_bucket
 from .services import Deps
 from .settings import WaveSettings, match, track_traits, tune
 from .store import Event
@@ -38,6 +44,10 @@ EARLY_SKIP_SECONDS = 30.0
 EARLY_SKIP_FRACTION = 0.25
 COMPLETE_FRACTION = 0.8
 FORGOTTEN_AFTER = 60 * DAY
+RECOVERY_BATCHES = 2  # сколько порций после серии пропусков собирать из того, что заходило
+COMFORT_DAYS = 14  # дослушанное за это время — куда возвращаться
+ABANDON_HOURS = 72  # прошлую волну бросили недавно: её последнее направление обходим
+PLAY_KINDS = ("complete", "late_skip", "early_skip", "dislike")
 
 # Веса слагаемых оценки «дослушает ли» (признаки нормируются внутри порции)
 WEIGHTS = dict(
@@ -59,6 +69,43 @@ def classify(outcome: str, position: float, duration: float) -> str:
     if position < EARLY_SKIP_SECONDS or fraction < EARLY_SKIP_FRACTION:
         return "early_skip"
     return "late_skip"
+
+
+@dataclass
+class WarmStart:
+    """С чего начать волну: что недавно дослушивали и от чего ушли в прошлый раз."""
+
+    comfort: list[str] = field(default_factory=list)  # дослушанное недавно, сначала в это же время суток
+    abandoned: list[str] = field(default_factory=list)  # серия пропусков, после которой волну закрыли
+
+
+def warm_start(events: list[Event], now: float) -> WarmStart:
+    plays = sorted((e for e in events if e.entity == "track" and e.kind in PLAY_KINDS), key=lambda e: e.ts)
+    bucket = time_bucket(now)
+    completes = [e for e in plays if e.kind == "complete" and now - e.ts < COMFORT_DAYS * DAY]
+    completes.sort(key=lambda e: (time_bucket(e.ts) != bucket, -e.ts))
+    comfort = list(dict.fromkeys(e.track_id for e in completes))[:12]
+    abandoned: list[str] = []
+    waves = [e for e in plays if e.session and e.context_type == "wave"]
+    if waves:
+        tail = [e for e in waves if e.session == waves[-1].session][-3:]
+        negative = [e for e in tail if e.kind in ("early_skip", "dislike")]
+        if len(negative) >= 2 and tail[-1].kind != "complete" and now - tail[-1].ts < ABANDON_HOURS * 3600:
+            abandoned = [e.track_id for e in negative]
+    return WarmStart(comfort=comfort, abandoned=abandoned)
+
+
+def redundant(events: list[Event], track_id: str, kind: str, position: float, ts: float) -> bool:
+    """Событие ничего не говорит о вкусе: повтор того же в пределах 15 секунд или пролистывание
+    трека, который недавно дослушали (листают историю «назад-вперёд», а не оценивают песню)."""
+    for e in events:
+        if e.track_id != track_id or e.entity != "track":
+            continue
+        if e.kind == kind and abs(ts - e.ts) < 15:
+            return True
+        if is_zap(kind, position) and e.kind in ("complete", "late_skip") and 0 <= ts - e.ts < 3 * 3600:
+            return True
+    return False
 
 
 def _fifths(key: str, scale: str) -> int | None:
@@ -127,7 +174,7 @@ def register_playback(
     if kind == "dislike":
         deps.run_io(deps.library.set_rating, track_id, 1)
     if taste is not None:
-        taste.note(track, track_id, kind)
+        taste.note(track, track_id, kind, position=position)
 
 
 @dataclass
@@ -175,6 +222,7 @@ class WaveSession:
         exclude: tuple[str, ...] | list[str] = (),
         device: str = "",
         seed: int | None = None,
+        warm: WarmStart | None = None,
     ):
         self.id = secrets.token_urlsafe(8)
         self.deps = deps
@@ -209,6 +257,9 @@ class WaveSession:
         self.picks: dict[str, Pick] = {}
         self.served: Counter[tuple[str, int]] = Counter()
         self.consecutive_skips = 0
+        self.zaps = 0  # пролистываний подряд
+        self.recover = 0  # сколько ближайших порций собирать из того, что заходило
+        self.comfort: list[str] = []  # дослушанное недавно в прошлых сессиях
         self.avoid: int | None = None
         self.explore_boost = 0  # сколько ближайших порций после «встряхнуть» идут с усиленной разведкой
         self._cluster_fit: np.ndarray | None = None
@@ -218,6 +269,22 @@ class WaveSession:
         self.background_refill = False
         self.refilling = False
         self.low_water = self.LOW_WATER  # в сервисе запас больше: хватает и на быстрые пропуски
+        if steer is None:
+            self._warm(warm or WarmStart())
+
+    def _warm(self, warm: WarmStart) -> None:
+        """Начало волны: от недавно дослушанного, в обход направления, где прошлую волну бросили.
+        Первая порция — из знакомого, а не веер по всем кластерам (его пропускали чаще всего)."""
+        self.comfort = list(warm.comfort)
+        vecs = self._vecs(warm.abandoned + warm.comfort[:8])
+        for i in warm.abandoned:
+            if i in vecs:
+                self.mult[self.profile.nearest(vecs[i])] *= 0.5
+                self.skipped.append((i, vecs[i]))
+        good = [vecs[i] for i in warm.comfort[:8] if i in vecs]
+        if good:
+            self.session_vec = unit(np.mean(good, axis=0))
+        self.recover = 1
 
     # --- публичный интерфейс ---
 
@@ -333,6 +400,7 @@ class WaveSession:
 
         if kind == "complete":
             self.consecutive_skips = 0
+            self.zaps = 0
             if from_steer:  # смещение возвращается к заданной силе, если похожее заходит
                 self.steer_strength += (self.steer_base - self.steer_strength) * 0.3
             if cluster is not None:
@@ -344,21 +412,25 @@ class WaveSession:
             return
 
         if kind == "late_skip":
+            self.zaps = 0
             if cluster is not None:
                 self.mult[cluster] *= 0.85
                 self.failures[cluster, bucket] += 0.4
             return
 
-        # ранний пропуск или «не нравится»
+        # ранний пропуск, пролистывание или «не нравится». Пролистывание (первые секунды) — «не это
+        # сейчас»: направление в сессии отодвигается чуть мягче, а во вкус почти не идёт (profile.note)
         strong = kind == "dislike"
+        zap = is_zap(kind, position)
+        self.zaps = self.zaps + 1 if zap else 0
         self.consecutive_skips += 1
         if from_steer:  # похожее на источник не заходит: меньше держимся за него и за эту его часть
             if not self.settings.similar_only:  # «только похожее» не разбавляем своим вкусом
                 self.steer_strength = max(0.15, self.steer_strength * (0.7 if strong else 0.85))
             self.steer_mult[pick.group] *= 0.6 if strong else 0.75
         if cluster is not None:
-            self.mult[cluster] *= 0.4 if strong else 0.6
-            self.failures[cluster, bucket] += 2 if strong else 1
+            self.mult[cluster] *= 0.4 if strong else 0.75 if zap else 0.6
+            self.failures[cluster, bucket] += 2 if strong else 0.5 if zap else 1
             if self.consecutive_skips >= 2:
                 self.mult[cluster] *= 0.5
                 self.avoid = cluster
@@ -367,8 +439,48 @@ class WaveSession:
             if self.session_vec is not None:
                 dot = float(self.session_vec @ v)
                 if dot > 0:
-                    self.session_vec = unit(self.session_vec - 0.6 * dot * v)
-        self._purge(v, track.artist if track else "", cluster, threshold=0.45 if strong else 0.55)
+                    self.session_vec = unit(self.session_vec - (0.3 if zap else 0.6) * dot * v)
+        self._purge(v, track.artist if track else "", cluster, threshold=0.45 if strong else 0.6 if zap else 0.55)
+        if self.consecutive_skips >= 2:
+            self._enter_recovery()
+
+    def _comfort_ids(self) -> list[str]:
+        """Что заходило: дослушанное в этой сессии, а если ничего — недавно, в прошлых."""
+        return list(reversed(self.completed[-5:])) or self.comfort[:8]
+
+    def _comfort_clusters(self) -> list[int]:
+        """Кластеры, куда вернуться: где дослушанное, с поправкой на историю этого времени суток."""
+        clusters = self.profile.clusters
+        vecs = self._vecs(self._comfort_ids())
+        votes = Counter(self.profile.nearest(v) for v in vecs.values())
+        succ, fail = self._bucket_stats()
+        posterior = (1 + succ) / (2 + succ + fail)
+        # доли, а не счёт: если и в знакомом пропускают (mult падает), волна переходит к следующему
+        share = np.array([votes.get(c.index, 0) for c in clusters], dtype=float) / max(1, sum(votes.values()))
+        score = (share + posterior) * self.mult * self._cluster_context_fit()
+        if self.avoid is not None:
+            score[self.avoid] *= 0.05
+        order = [int(c) for c in np.argsort(-score)]
+        if len(order) > 1 and votes.get(order[1], 0) and order[1] != self.avoid:
+            return order[:2]
+        return order[:1]
+
+    def _enter_recovery(self) -> None:
+        """Серия пропусков: следующие порции — из того, что заходило, а не разведка нового.
+        Из очереди уходит всё, что не оттуда, чтобы следующий трек уже был знакомым по звучанию."""
+        self.recover = RECOVERY_BATCHES
+        vecs = self._vecs(self._comfort_ids())
+        if vecs:
+            self.session_vec = unit(np.mean(list(vecs.values()), axis=0))
+        keep = set(self._comfort_clusters())
+        stay = []
+        for t in self.queue:
+            pick = self.picks.get(t.id)
+            if pick is not None and not pick.explore and pick.origin == "taste" and pick.cluster in keep:
+                stay.append(t)
+            else:
+                self.shown.discard(t.id)
+        self.queue = stay
 
     def _purge(self, v: np.ndarray | None, artist: str, cluster: int | None, threshold: float) -> None:
         """Убрать из очереди всё, что похоже на только что пропущенный трек."""
@@ -414,8 +526,13 @@ class WaveSession:
     def _refill(self) -> None:
         batch = self._batch(self.BATCH) or self._fallback(self.BATCH)
         self.queue.extend(batch)
+        self._batch_done()
+
+    def _batch_done(self) -> None:
         if self.explore_boost:
             self.explore_boost -= 1
+        if self.recover:
+            self.recover -= 1
 
     def _bucket_stats(self) -> tuple[np.ndarray, np.ndarray]:
         if not self.tuning.context_aware:
@@ -452,6 +569,10 @@ class WaveSession:
         clusters = self.profile.clusters
         if len(clusters) == 1:
             return [(0, False)]
+        if self.recover:  # после серии пропусков и в начале волны — знакомое, без разведки
+            chosen = self._comfort_clusters()
+            self.avoid = None
+            return [(c, False) for c in chosen]
         share = np.array([c.share for c in clusters])
         served = np.array([self.served[("taste", c.index)] for c in clusters], dtype=float)
         succ, fail = self._bucket_stats()
@@ -472,7 +593,7 @@ class WaveSession:
         order = np.argsort(-p)
         main = int(order[0])
         explore = min(0.6, self.tuning.explore + (0.35 if self.explore_boost else 0.0))
-        if self.rng.random() < explore or self.consecutive_skips >= 2:
+        if self.rng.random() < explore:
             others = order[1:]
             posterior = (1 + succ[others]) / (2 + succ[others] + fail[others])
             w = self.mult[others] * posterior * fit[others] / np.sqrt(share[others])
@@ -525,7 +646,8 @@ class WaveSession:
 
     def _favorites_pool(self, cluster) -> list[str]:
         """Уже любимые треки кластера; для «Забытого» — только те, что давно не звучали."""
-        pool = [m for m in cluster.members if m not in self.shown]
+        # лайкнутое пачкой («Лайкнуть все») — не любимое, пока его не дослушали
+        pool = [m for m in cluster.members if m not in self.shown and m not in self.taste.bulk_liked]
         if self.tuning.character == "forgotten":
             pool = self._forgotten(pool)
         return pool[: self.tuning.favorites * 3]
@@ -541,7 +663,10 @@ class WaveSession:
             return [i for i in ids if i in self.picks and self.picks[i].origin == origin and self.picks[i].group == c]
 
         add = list(seeds)
-        if origin == "taste" or len(cluster.members) < 4:
+        if origin == "taste" and self.recover and self.completed:
+            # после серии пропусков ищем рядом с тем, что в этой сессии дослушали, а не от центра кластера
+            add = list(reversed(self.completed))[:3] + seeds[:1]
+        elif origin == "taste" or len(cluster.members) < 4:
             # вкус и волна по одному треку подстраиваются под дослушанное в сессии;
             # плейлист и альбом держат свои опорные треки, чтобы не уплыть
             add += same_group(reversed(self.completed))[:2]
@@ -610,8 +735,7 @@ class WaveSession:
             return
         batch = self._batch(self.BATCH, (prepared[0], prepared[1], rows)) or self._fallback(self.BATCH)
         self.queue.extend(batch)
-        if self.explore_boost:
-            self.explore_boost -= 1
+        self._batch_done()
 
     def _batch(self, k: int, prepared: tuple | None = None) -> list[Track]:
         if prepared is None:

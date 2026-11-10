@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -21,7 +23,7 @@ def test_one_button_flow(client):
     assert len(state["upcoming"]) == 3
     sid = state["session"]
 
-    state = client.post(f"/api/wave/{sid}/advance", json={"track_id": track["id"], "outcome": "skip", "position": 4}).json()
+    state = client.post(f"/api/wave/{sid}/advance", json={"track_id": track["id"], "outcome": "skip", "position": 10}).json()
     assert state["track"]["id"] != track["id"]
 
     liked = client.post(f"/api/wave/{sid}/like", json={"track_id": state["track"]["id"]}).json()
@@ -95,11 +97,12 @@ def test_mix_by_song_and_save_as_playlist(client):
 
 def test_events_outside_wave_and_entity_likes_feed_taste(client):
     track = client.post("/api/wave/start", json={}).json()["track"]
-    for _ in range(3):
+    now = time.time()
+    for n in range(3):  # три прослушивания в разное время: одинаковое событие в те же секунды — это повтор
         result = client.post(
             "/api/events",
             json={"track_id": track["id"], "outcome": "skip", "position": 5, "context_type": "album",
-                  "context_id": track["album_id"]},
+                  "context_id": track["album_id"], "at": now - 600 * (n + 1)},
         ).json()
         assert result["kind"] == "early_skip"
     assert client.post("/api/like", json={"type": "album", "id": track["album_id"]}).json()["ok"]

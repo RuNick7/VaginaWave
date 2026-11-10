@@ -70,6 +70,9 @@ data class PlayerState(
  * прослушивания и лайки копятся в Offline и уходят на сервер, когда связь вернётся.
  */
 object VolnaPlayer {
+    /** Пропуск при листании истории раньше этого — навигация, на сервер не отправляется. */
+    private const val NAVIGATION_SECONDS = 5.0
+
     private val scope = MainScope()
     private val _state = MutableStateFlow(PlayerState())
     val state: StateFlow<PlayerState> = _state
@@ -271,7 +274,8 @@ object VolnaPlayer {
             try {
                 when {
                     replaying -> {
-                        report(track, outcome, position, duration, PlayContext("other"))
+                        // листает историю «назад-вперёд»: трек уже звучал, это навигация, а не оценка
+                        if (position >= NAVIGATION_SECONDS) report(track, outcome, position, duration, PlayContext("other"))
                         remember(track)
                         load(forward.removeLast())
                     }

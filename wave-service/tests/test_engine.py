@@ -74,7 +74,7 @@ def test_two_skips_in_a_row_switch_cluster(world_deps):
     first = session.picks[track.id].cluster
     for _ in range(2):
         cluster = session.picks[track.id].cluster
-        track = session.advance(track.id, "skip", position=3, duration=track.duration)
+        track = session.advance(track.id, "skip", position=10, duration=track.duration)
     assert session.picks[track.id].cluster != cluster or cluster != first
 
 
@@ -162,7 +162,7 @@ def test_skipping_track_like_songs_weakens_the_shift(world_deps):
     for _ in range(8):
         pick = session.picks[track.id]
         outcome = "skip" if pick.origin == "steer" else "complete"
-        track = session.advance(track.id, outcome, position=4 if outcome == "skip" else track.duration,
+        track = session.advance(track.id, outcome, position=10 if outcome == "skip" else track.duration,
                                 duration=track.duration)
     assert session.steer_strength < 0.8 * 0.7
 
@@ -256,6 +256,6 @@ def test_skips_inside_an_album_lower_its_affinity(world_deps):
     profile = build_profile(deps)
     album_id = world.tracks[world.ids[0]].album_id
     for track_id in [i for i in world.ids if world.tracks[i].album_id == album_id][:3]:
-        register_playback(deps, profile, track_id, "early_skip", position=4, duration=60,
+        register_playback(deps, profile, track_id, "early_skip", position=10, duration=60,
                           context_type="album", context_id=album_id)
     assert build_profile(deps).album_affinity(album_id) < 0

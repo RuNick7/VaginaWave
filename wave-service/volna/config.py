@@ -81,6 +81,7 @@ class Settings:
     explo_password: str = ""
     lidarr_url: str = ""  # Lidarr: пользователи ставят исполнителей на докачку дискографий
     lidarr_api_key: str = ""
+    lastfm_api_key: str = ""  # популярные треки артиста по всему миру (Last.fm), а не по прослушиваниям здесь
 
     @property
     def env_server(self) -> ServerConfig | None:
@@ -117,4 +118,5 @@ class Settings:
             explo_password=env("EXPLO_PASSWORD", ""),
             lidarr_url=env("LIDARR_URL", "").rstrip("/"),
             lidarr_api_key=env("LIDARR_API_KEY", ""),
+            lastfm_api_key=env("LASTFM_API_KEY", ""),
         )

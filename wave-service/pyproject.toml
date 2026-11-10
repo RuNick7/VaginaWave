@@ -1,6 +1,6 @@
 [project]
 name = "volna-wave-service"
-version = "0.14.0"
+version = "0.15.0"
 description = "Прототип «Моей волны» для Navidrome + AudioMuse-AI"
 requires-python = ">=3.11"
 dependencies = [
