@@ -197,6 +197,12 @@ class Lidarr:
             known = [i for i in exact if i in known_ids]
             if len(known) == 1:
                 return known[0]
+            if len(exact) == 1:
+                # уже в Lidarr и так зовётся в псевдонимах (J.S. Bach = Johann Sebastian Bach) — важнее тёзки
+                aliased = [c["foreignArtistId"] for c in found[:5] if c["foreignArtistId"] not in exact
+                           and c["foreignArtistId"] in known_ids and self._alias_match(variant, c["foreignArtistId"])]
+                if len(aliased) == 1:
+                    return aliased[0]
             if len(exact) == 1 and not self._no_releases(exact[0]):
                 return exact[0]
             if evidence is None:

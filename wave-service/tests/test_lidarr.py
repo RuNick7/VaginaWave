@@ -165,3 +165,13 @@ def test_lone_namesake_without_releases_is_not_taken():
     lidarr = Lidarr("http://lidarr", "key", transport=httpx.MockTransport(FakeLidarr(lookup, meta=meta)))
     with pytest.raises(LidarrError):
         lidarr.resolve("Vladimir Sorokin", ["IMAGO"])
+
+
+def test_alias_of_a_followed_artist_beats_a_namesake_band():
+    """«J.S. Bach» в тегах — композитор, которого так зовут в псевдонимах, а не валлийская группа J.S. Bach."""
+    lookup = {"J.S. Bach": [{"artistName": "J.S. Bach", "foreignArtistId": "band"},
+                            {"artistName": "Johann Sebastian Bach", "foreignArtistId": "z-mbid"}]}
+    meta = {"z-mbid": {"artistname": "Johann Sebastian Bach", "artistaliases": ["J. S. Bach"]},
+            "band": {"artistname": "J.S. Bach", "Albums": [{"Title": "x"}]}}
+    lidarr = Lidarr("http://lidarr", "key", transport=httpx.MockTransport(FakeLidarr(lookup, meta=meta)))
+    assert lidarr.resolve("J.S. Bach") == "z-mbid"  # z-mbid уже в Lidarr (FakeLidarr)
