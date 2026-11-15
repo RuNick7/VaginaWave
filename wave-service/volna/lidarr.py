@@ -19,6 +19,9 @@ import httpx
 from .library import _plain, skeleton
 
 CACHE_SECONDS = 60
+# Тег Lidarr у исполнителей, которых попросили кнопкой «Скачать дискографию»: Soularr (soularr_plus.py
+# в navidrome-stack) ставит их главные релизы в начало очереди, остальных берёт по кругу
+REQUEST_TAG = "vaginawave"
 # метаданные, которыми пользуется сам Lidarr: псевдонимы и полная дискография исполнителя
 METADATA_URL = "https://api.lidarr.audio/api/v0.4/"
 _FILLER = {"the", "a", "an", "and", "&", "и", "+"}
@@ -219,8 +222,20 @@ class Lidarr:
             raise LidarrError("В MusicBrainz несколько исполнителей с таким именем: найдите нужного в «Добавить исполнителя»")
         raise LidarrError("Не нашёл исполнителя в MusicBrainz под таким именем: попробуйте «Добавить исполнителя»")
 
+    def _request_tag(self) -> int:
+        """id тега «попросили в VaginaWave»; создаётся при первой просьбе."""
+        found = next((t["id"] for t in self._get("/tag") if t.get("label") == REQUEST_TAG), None)
+        if found is None:
+            r = self.http.post("/tag", json={"label": REQUEST_TAG})
+            r.raise_for_status()
+            found = r.json()["id"]
+        return found
+
     def follow(self, mbid: str) -> dict:
-        """Поставить исполнителя на докачку: добавить в Lidarr или включить слежение за всеми альбомами."""
+        """Поставить исполнителя на докачку: добавить в Lidarr или включить слежение за всеми альбомами.
+
+        Исполнитель помечается тегом REQUEST_TAG: его главные релизы Soularr скачает первыми."""
+        tag = self._request_tag()
         existing = next((a for a in self.artists(fresh=True) if a["foreignArtistId"] == mbid), None)
         if existing is None:
             found = self._get("/artist/lookup", term=f"lidarr:{mbid}")
@@ -234,6 +249,7 @@ class Lidarr:
                 "rootFolderPath": root["path"],
                 "monitored": True,
                 "monitorNewItems": "all",
+                "tags": [tag],
                 "addOptions": {"monitor": "all", "searchForMissingAlbums": False},  # ищет и качает Soularr
             }
             r = self.http.post("/artist", json=body)
@@ -241,7 +257,8 @@ class Lidarr:
                 raise LidarrError(f"Lidarr не добавил исполнителя: {r.text.strip()[:200]}")
             artist = r.json()
         else:
-            artist = {**existing, "monitored": True, "monitorNewItems": "all"}
+            tags = sorted(set(existing.get("tags") or []) | {tag})
+            artist = {**existing, "monitored": True, "monitorNewItems": "all", "tags": tags}
             self.http.put(f"/artist/{artist['id']}", json=artist).raise_for_status()
             albums = [a["id"] for a in self._get("/album", artistId=artist["id"]) if not a.get("monitored")]
             if albums:

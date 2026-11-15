@@ -18,6 +18,7 @@ class FakeLidarr:
                  meta: dict[str, dict] | None = None):
         self.artists = [{"id": 1, "artistName": "Земфира", "foreignArtistId": "z-mbid", "monitored": False, "monitorNewItems": "none"}]
         self.album_lookup = albums or {}
+        self.tags: list[dict] = []
         self.meta = meta or {}
         self.albums = {1: [{"id": 10, "monitored": False, "statistics": {"trackFileCount": 5}},
                            {"id": 11, "monitored": False, "statistics": {"trackFileCount": 0}}]}
@@ -56,6 +57,12 @@ class FakeLidarr:
             return httpx.Response(202)
         if path == "/artist/lookup":
             return httpx.Response(200, json=self.lookup.get(request.url.params["term"], []))
+        if path == "/tag" and method == "GET":
+            return httpx.Response(200, json=self.tags)
+        if path == "/tag" and method == "POST":
+            tag = {"id": len(self.tags) + 1, **json.loads(request.content)}
+            self.tags.append(tag)
+            return httpx.Response(201, json=tag)
         if path == "/rootfolder":
             return httpx.Response(200, json=[{"path": "/mnt/music/lidarr", "defaultQualityProfileId": 3, "defaultMetadataProfileId": 1}])
         return httpx.Response(404)
@@ -68,6 +75,8 @@ def test_existing_artist_is_found_by_spelling_and_followed():
     assert found["id"] == 1 and lidarr.status(found) == {"in_lidarr": True, "following": False, "name": "Земфира", "albums": 0, "have": 0}
     lidarr.follow("z-mbid")
     assert fake.monitored_albums == [10, 11] and fake.artists[0]["monitorNewItems"] == "all"
+    # попросили вручную: тег, по которому Soularr ставит его главные релизы первыми
+    assert fake.tags == [{"id": 1, "label": "vaginawave"}] and fake.artists[0]["tags"] == [1]
     assert lidarr.status(lidarr.find("Zemfira")) == {"in_lidarr": True, "following": True, "name": "Земфира", "albums": 2, "have": 1}
 
 
@@ -83,6 +92,7 @@ def test_library_artist_gets_its_discography_from_the_artist_page(tmp_path):
     assert done["following"] and done["albums"] == 1
     added = fake.added[0]
     assert added["monitorNewItems"] == "all" and added["addOptions"]["monitor"] == "all" and added["qualityProfileId"] == 3
+    assert added["tags"] == [1]
 
 
 def test_ambiguous_names_are_not_guessed(tmp_path):
