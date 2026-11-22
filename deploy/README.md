@@ -1,11 +1,12 @@
 # VaginaWave на сервере
 
-Сервис VaginaWave работает на том же сервере, что Navidrome и AudioMuse, отдельным Docker-контейнером. Приложение и веб-версия открываются по адресу Navidrome с путём `/volna`, например `https://music.example.com/volna/`. Войти может любой пользователь Navidrome своим логином и паролем. У каждого свои волна, история пропусков, профиль вкуса и настройки, а лайки и прослушивания уходят в Navidrome от его имени. Общий у всех только кэш звучания из AudioMuse. Адреса Navidrome и AudioMuse меняет администратор Navidrome или тот, кто подключил сервис.
+Сервис VaginaWave работает на том же сервере, что Navidrome и AudioMuse, отдельным Docker-контейнером. Веб-версия открывается в корне домена, например `https://music.example.com/`; прежний адрес с путём `/volna/` тоже работает. Navidrome на том же домене живёт под `/navi`. Войти может любой пользователь Navidrome своим логином и паролем. У каждого свои волна, история пропусков, профиль вкуса и настройки, а лайки и прослушивания уходят в Navidrome от его имени. Общий у всех только кэш звучания из AudioMuse. Адреса Navidrome и AudioMuse меняет администратор Navidrome или тот, кто подключил сервис.
 
 ```
-телефон ──https──▶ Caddy ─┬─ /volna/* ──▶ volna:8765 ──▶ navidrome:4533
-                          │                          └─▶ audiomuse-flask:8000
-                          └─ остальное ─▶ navidrome:4533
+телефон ──https──▶ Caddy ─┬─ /, /volna/* ──▶ volna:8765 ─┬─▶ Navidrome (Subsonic API)
+                          │                              └─▶ audiomuse-flask:8000
+                          ├─ /navi/* ──────▶ navidrome:4533   (ND_BASEURL=/navi)
+                          └─ /rest/* ──────▶ navidrome:4533/navi/rest
 ```
 
 ## Что где лежит
@@ -49,11 +50,24 @@ LASTFM_API_KEY=…
 
 ## Caddy
 
-В `Caddyfile` стека Navidrome основной сайт отдаёт `/volna/*` в VaginaWave, а остальное, как и раньше, в Navidrome:
+В `Caddyfile` стека Navidrome корень домена отдан VaginaWave, а Navidrome живёт под `/navi` (`ND_BASEURL: /navi` в его `docker-compose.yml`). Subsonic API (`/rest/*`) отвечает и в корне, поэтому приложениям и самому VaginaWave с адресом сервера без `/navi` ничего менять не нужно. Это важно и для истории волны: имя файла `server-*.db` считается от адреса Navidrome, который записан в сервисе, и при смене адреса история начнётся с нуля.
 
 ```caddy
 {$ND_DOMAIN}:{$HTTPS_PORT} {
 	encode zstd gzip
+
+	@navi path /navi /navi/*
+	handle @navi {
+		reverse_proxy navidrome:4533
+	}
+
+	handle /rest/* {
+		rewrite * /navi{uri}
+		reverse_proxy navidrome:4533
+	}
+
+	@old_navidrome path /app /app/* /share/*
+	redir @old_navidrome /navi{uri} 308
 
 	redir /volna /volna/ 308
 	handle_path /volna/* {
@@ -63,12 +77,14 @@ LASTFM_API_KEY=…
 	}
 
 	handle {
-		reverse_proxy navidrome:4533
+		reverse_proxy volna:8765 {
+			header_up -X-Forwarded-Prefix
+		}
 	}
 }
 ```
 
-После правки Caddy перечитывает конфиг без перезапуска:
+После правки Caddy перечитывает конфиг без перезапуска. Если `Caddyfile` заменяли целиком (`scp`, `sed -i`), контейнер видит старый файл: тогда вместо этого `docker compose restart caddy` в папке стека.
 
 ```bash
 docker exec navidrome-stack-caddy-1 caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
