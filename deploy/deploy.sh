@@ -20,4 +20,4 @@ COPYFILE_DISABLE=1 tar -C "$ROOT" -cz --no-xattrs --no-mac-metadata \
 
 echo "Собираю и перезапускаю…"
 ssh "$SERVER" 'set -e; cd /opt/volna && mkdir -p data && chown 1000:1000 data && docker compose up -d --build && docker image prune -f >/dev/null'
-echo "Готово: https://${SERVER#*@}/volna/"
+echo "Готово: https://${SERVER#*@}/"
